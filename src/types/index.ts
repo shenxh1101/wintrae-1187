@@ -1,5 +1,6 @@
 export type GuestGroup = 'groom' | 'bride' | 'colleague' | 'friend' | 'relative' | 'other';
 export type GuestStatus = 'inviting' | 'confirmed' | 'pending' | 'absent';
+export type GuestTag = 'elderly' | 'child' | 'disabled' | 'vip' | 'pregnant';
 
 export interface Guest {
   id: string;
@@ -12,6 +13,9 @@ export interface Guest {
   specialNeeds: string;
   seatPreference: string;
   conflictIds: string[];
+  withIds: string[];
+  familyIds: string[];
+  tags: GuestTag[];
   tableId: string | null;
 }
 
@@ -109,6 +113,22 @@ export const GUEST_STATUS_LABELS: Record<GuestStatus, string> = {
   confirmed: '已确认',
   pending: '待定',
   absent: '无法出席',
+};
+
+export const GUEST_TAG_LABELS: Record<GuestTag, string> = {
+  elderly: '老人',
+  child: '小孩',
+  disabled: '行动不便',
+  vip: 'VIP',
+  pregnant: '孕妇',
+};
+
+export const GUEST_TAG_COLORS: Record<GuestTag, string> = {
+  elderly: 'bg-champagne-100 text-champagne-400 border-champagne-200',
+  child: 'bg-rose-50 text-rose-500 border-rose-200',
+  disabled: 'bg-purple-50 text-purple-600 border-purple-100',
+  vip: 'bg-gradient-to-r from-champagne-100 to-champagne-200 text-champagne-400 border-champagne-300',
+  pregnant: 'bg-mint-100 text-mint-400 border-mint-200',
 };
 
 export const SUPPLIER_CATEGORY_LABELS: Record<SupplierCategory, string> = {
