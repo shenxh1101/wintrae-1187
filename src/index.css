@@ -1,0 +1,141 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Noto Sans SC', system-ui, sans-serif;
+    scroll-behavior: smooth;
+  }
+  body {
+    background: linear-gradient(135deg, #FFF8F5 0%, #FDFBF5 50%, #FDEDED 100%);
+    background-attachment: fixed;
+    min-height: 100vh;
+    color: #3A3A3A;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Noto Serif SC', Georgia, serif;
+  }
+  ::selection {
+    background-color: rgba(248, 180, 180, 0.4);
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white/90 backdrop-blur-sm rounded-2xl shadow-card border border-rose-100/60 transition-all duration-300 hover:shadow-hover hover:-translate-y-0.5;
+  }
+  .card-inner {
+    @apply p-5 sm:p-6;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl font-medium text-sm transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-rose-300 focus:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-gradient-to-br from-rose-300 to-rose-400 text-white shadow-soft hover:from-rose-400 hover:to-rose-500 hover:shadow-hover;
+  }
+  .btn-secondary {
+    @apply btn bg-champagne-100 text-ink-800 border border-champagne-200 hover:bg-champagne-200;
+  }
+  .btn-outline {
+    @apply btn bg-white/70 text-ink-700 border border-rose-200 hover:bg-rose-50;
+  }
+  .btn-ghost {
+    @apply btn text-ink-600 hover:bg-rose-50;
+  }
+  .btn-danger {
+    @apply btn bg-red-50 text-red-600 border border-red-100 hover:bg-red-100;
+  }
+  .input {
+    @apply w-full px-3.5 py-2.5 rounded-xl border border-sand-200 bg-white text-ink-800 text-sm placeholder:text-ink-500 focus:outline-none focus:ring-2 focus:ring-rose-300 focus:border-rose-300 transition-all;
+  }
+  .select {
+    @apply input appearance-none bg-no-repeat bg-right pr-9;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%237A7A7A' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 0.75rem center;
+    background-size: 1.25em 1.25em;
+  }
+  .textarea {
+    @apply input resize-y min-h-[80px];
+  }
+  .label {
+    @apply block text-sm font-medium text-ink-700 mb-1.5;
+  }
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium transition-all;
+  }
+  .page-title {
+    @apply font-serif text-2xl sm:text-3xl font-bold text-ink-900 mb-1;
+  }
+  .section-title {
+    @apply font-serif text-lg sm:text-xl font-semibold text-ink-800 mb-3;
+  }
+  .divider {
+    @apply h-px bg-gradient-to-r from-transparent via-rose-200 to-transparent my-5;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(248, 180, 180, 0.5) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(248, 180, 180, 0.4);
+    border-radius: 999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(248, 180, 180, 0.6);
+  }
+  .dragging {
+    opacity: 0.5;
+  }
+  .drag-over {
+    transform: scale(1.02);
+    box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.5);
+  }
+  .conflict-pulse {
+    animation: conflictPulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes conflictPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(232, 101, 101, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(232, 101, 101, 0);
+  }
+}
+
+@media print {
+  body {
+    background: white !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .card {
+    box-shadow: none !important;
+    border: 1px solid #ddd !important;
+    break-inside: avoid;
+  }
+  .btn, button {
+    display: none !important;
+  }
+  .page-break {
+    page-break-before: always;
+  }
+  @page {
+    margin: 1.5cm;
+  }
+}
