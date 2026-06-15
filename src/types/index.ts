@@ -15,8 +15,45 @@ export interface Guest {
   conflictIds: string[];
   withIds: string[];
   familyIds: string[];
+  conflictReasons: Record<string, string>;
   tags: GuestTag[];
   tableId: string | null;
+}
+
+export interface PlanTimelineEntry {
+  id: string;
+  timestamp: number;
+  action: 'create' | 'update' | 'lock' | 'unlock' | 'mark_final' | 'unmark_final' | 'seat_change';
+  description: string;
+  guestId?: string;
+  fromTableId?: string | null;
+  toTableId?: string | null;
+}
+
+export interface SeatingPlan {
+  id: string;
+  name: string;
+  description: string;
+  isFinal: boolean;
+  isLocked: boolean;
+  assignments: Record<string, string>;
+  timeline: PlanTimelineEntry[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PlanDiffEntry {
+  type: 'table_change' | 'seat_added' | 'seat_removed';
+  guestId: string;
+  fromTableId?: string | null;
+  toTableId?: string | null;
+}
+
+export interface SeatingCheckItem {
+  type: 'family_split' | 'with_split' | 'conflict' | 'no_seat';
+  guestIds: string[];
+  tableIds: string[];
+  message: string;
 }
 
 export interface Table {

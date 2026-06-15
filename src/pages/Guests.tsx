@@ -3,7 +3,7 @@ import {
   Users, UserPlus, UserCheck, Clock, UserX, Search,
   Edit3, Trash2, ChevronDown, ChevronUp, Filter, AlertOctagon,
   AlertTriangle, Heart, UsersRound, Baby, Accessibility, Crown, Flower2, X, Plus as PlusIcon,
-  MapPin, Link2Off, Link2,
+  MapPin, Link2Off, Link2, MessageCircle,
 } from 'lucide-react';
 import { useWeddingStore } from '@/store/useWeddingStore';
 import StatCard from '@/components/StatCard';
@@ -26,7 +26,7 @@ const TagIconMap: Record<GuestTag, any> = {
 const emptyGuest: Omit<Guest, 'id'> = {
   name: '', phone: '', group: 'friend', status: 'inviting',
   headcount: 1, dietary: '', specialNeeds: '', seatPreference: '',
-  conflictIds: [], withIds: [], familyIds: [], tags: [], tableId: null,
+  conflictIds: [], withIds: [], familyIds: [], conflictReasons: {}, tags: [], tableId: null,
 };
 
 const statusColorMap: Record<GuestStatus, string> = {
@@ -102,6 +102,7 @@ export default function Guests() {
         headcount: g.headcount, dietary: g.dietary, specialNeeds: g.specialNeeds,
         seatPreference: g.seatPreference,
         conflictIds: g.conflictIds || [], withIds: g.withIds || [], familyIds: g.familyIds || [],
+        conflictReasons: g.conflictReasons || {},
         tags: g.tags || [], tableId: g.tableId,
       });
     } else {
@@ -169,9 +170,21 @@ export default function Guests() {
           }));
         }
       });
+      if (!newArr.includes(id)) {
+        const reasons = { ...(form.conflictReasons || {}) };
+        delete reasons[id];
+        setForm(prev => ({ ...prev, conflictReasons: reasons }));
+      }
     }
 
     setForm({ ...form, [field]: newArr });
+  };
+
+  const updateConflictReason = (targetId: string, reason: string) => {
+    setForm(prev => ({
+      ...prev,
+      conflictReasons: { ...(prev.conflictReasons || {}), [targetId]: reason },
+    }));
   };
 
   const toggleTag = (tag: GuestTag) => {
@@ -219,9 +232,21 @@ export default function Guests() {
           </div>
         )}
         {conflictNames.length > 0 && (
-          <div className="flex items-start gap-1.5 text-xs bg-red-50 border border-red-100 rounded-lg p-2">
-            <AlertOctagon className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
-            <span className="text-red-600">禁止同桌：<span className="font-semibold">{conflictNames.join('、')}</span></span>
+          <div className="space-y-1">
+            <div className="flex items-start gap-1.5 text-xs bg-red-50 border border-red-100 rounded-lg p-2">
+              <AlertOctagon className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+              <span className="text-red-600">禁止同桌：<span className="font-semibold">{conflictNames.join('、')}</span></span>
+            </div>
+            {(g.conflictIds || []).map(cid => {
+              const reason = g.conflictReasons?.[cid];
+              if (!reason) return null;
+              return (
+                <div key={cid} className="flex items-start gap-1.5 text-[11px] ml-5 text-red-500">
+                  <MessageCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                  <span>与 {guestNameMap[cid]}：{reason}</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -239,7 +264,7 @@ export default function Guests() {
     const others = guests.filter(g => g.id !== editing?.id && g.status !== 'absent');
     const selected = form[field] || [];
     return (
-      <div className="sm:col-span-2">
+      <div className="sm:col-span-2 space-y-2">
         <label className="label flex items-center gap-1.5">
           <Icon className={`w-4 h-4 ${color}`} />
           {title}
@@ -280,6 +305,30 @@ export default function Guests() {
             })
           )}
         </div>
+        {field === 'conflictIds' && selected.length > 0 && (
+          <div className="space-y-2 pt-2">
+            <div className="text-xs text-ink-500 flex items-center gap-1">
+              <MessageCircle className="w-3.5 h-3.5" />
+              冲突原因说明（可选，方便家人讨论时了解背景）
+            </div>
+            {selected.map(sid => {
+              const other = guests.find(g => g.id === sid);
+              if (!other) return null;
+              return (
+                <div key={sid} className="flex items-center gap-2">
+                  <span className="text-sm text-ink-700 w-20 shrink-0">{other.name}：</span>
+                  <input
+                    type="text"
+                    className="input !py-1.5 !text-sm flex-1"
+                    placeholder="如：长辈矛盾、饮食习惯冲突、前任关系..."
+                    value={form.conflictReasons?.[sid] || ''}
+                    onChange={e => updateConflictReason(sid, e.target.value)}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   };
@@ -295,7 +344,7 @@ export default function Guests() {
     const assignedTable = tables.find(t => t.id === editing.tableId);
     const familyNames = (editing.familyIds || []).map(id => guestNameMap[id]).filter(Boolean);
     const withNames = (editing.withIds || []).map(id => guestNameMap[id]).filter(Boolean);
-    const conflictNames = (editing.conflictIds || []).map(id => guestNameMap[id]).filter(Boolean);
+    const conflictIds = (editing.conflictIds || []);
 
     return (
       <div className="sm:col-span-2 bg-gradient-to-br from-rose-50 to-champagne-50 rounded-xl p-4 border border-rose-100">
@@ -333,21 +382,31 @@ export default function Guests() {
               </div>
             </div>
           )}
-          {conflictNames.length > 0 && (
+          {conflictIds.length > 0 && (
             <div className="flex items-start gap-2 sm:col-span-2">
               <Link2Off className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-              <div>
-                <span className="text-ink-500">冲突对象（{conflictNames.length}人）：</span>
-                <span className="text-red-500 font-medium">{conflictNames.join('、')}</span>
-                {conflictNames.map(name => (
-                  <span key={name} className="block text-[11px] text-red-400 mt-0.5">
-                    → 与 {name} 不适合同桌，请在桌位编排时注意
-                  </span>
-                ))}
+              <div className="flex-1">
+                <span className="text-ink-500">冲突对象（{conflictIds.length}人）：</span>
+                <div className="mt-1 space-y-1">
+                  {conflictIds.map(cid => {
+                    const name = guestNameMap[cid];
+                    const reason = editing.conflictReasons?.[cid];
+                    return (
+                      <div key={cid} className="flex items-start gap-1.5">
+                        <span className="text-red-500 font-medium">→ {name}</span>
+                        {reason && (
+                          <span className="text-red-400 text-[11px] bg-red-50 rounded px-1.5 py-0.5">
+                            {reason}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           )}
-          {familyNames.length === 0 && withNames.length === 0 && conflictNames.length === 0 && (
+          {familyNames.length === 0 && withNames.length === 0 && conflictIds.length === 0 && (
             <div className="sm:col-span-2 text-ink-400 text-sm">
               暂无关系记录，可在下方添加与其他宾客的关系
             </div>

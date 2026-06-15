@@ -3,13 +3,13 @@ import {
   LayoutGrid, Plus, Edit3, Trash2, AlertTriangle, Users, Search, X, GripVertical,
   Sparkles, Crown, Baby, Accessibility, Flower2, Heart, UsersRound, AlertOctagon,
   Save, ChevronDown, ChevronRight, CheckCircle2, Clock, Star, StarOff, FileText,
-  MapPin, Settings,
+  MapPin, Settings, Lock, Unlock, History, MessageCircle, Target, ZoomIn,
 } from 'lucide-react';
 import { useWeddingStore } from '@/store/useWeddingStore';
 import StatCard from '@/components/StatCard';
 import Modal from '@/components/Modal';
 import EmptyState from '@/components/EmptyState';
-import type { Guest, Table, GuestGroup, GuestStatus, GuestTag, SeatingPlan } from '@/types';
+import type { Guest, Table, GuestGroup, GuestStatus, GuestTag, SeatingPlan, PlanDiffEntry, SeatingCheckItem } from '@/types';
 import {
   GUEST_GROUP_LABELS, GUEST_STATUS_LABELS, GUEST_TAG_LABELS, GUEST_TAG_COLORS,
 } from '@/types';
@@ -28,7 +28,8 @@ export default function Tables() {
     guests, tables, seatingPlans, activePlanId,
     addTable, updateTable, deleteTable, assignGuestToTable,
     saveSeatingPlan, loadSeatingPlan, updateSeatingPlan, deleteSeatingPlan,
-    setFinalSeatingPlan, unsetFinalSeatingPlan,
+    setFinalSeatingPlan, unsetFinalSeatingPlan, lockSeatingPlan, unlockSeatingPlan,
+    getSeatingCheck,
   } = useWeddingStore();
 
   const [tableModalOpen, setTableModalOpen] = useState(false);
@@ -48,9 +49,13 @@ export default function Tables() {
   const [planDescription, setPlanDescription] = useState('');
   const [expandedTableId, setExpandedTableId] = useState<string | null>(null);
   const [showPlansPanel, setShowPlansPanel] = useState(false);
+  const [showCheckPanel, setShowCheckPanel] = useState(false);
   const [comparePlanId, setComparePlanId] = useState<string | null>(null);
   const [editingPlan, setEditingPlan] = useState<SeatingPlan | null>(null);
   const [editPlanModalOpen, setEditPlanModalOpen] = useState(false);
+  const [timelinePlan, setTimelinePlan] = useState<SeatingPlan | null>(null);
+  const [timelineModalOpen, setTimelineModalOpen] = useState(false);
+  const [highlightTableId, setHighlightTableId] = useState<string | null>(null);
 
   const stats = useMemo(() => {
     const totalSeats = tables.reduce((s, t) => s + t.capacity, 0);
@@ -101,6 +106,10 @@ export default function Tables() {
     });
   }, [guests, filterStatus, filterGroup, search]);
 
+  const seatingCheckItems = useMemo<SeatingCheckItem[]>(() => {
+    return getSeatingCheck();
+  }, [getSeatingCheck]);
+
   const activePlan = useMemo(() => {
     return seatingPlans.find(p => p.id === activePlanId);
   }, [seatingPlans, activePlanId]);
@@ -116,13 +125,14 @@ export default function Tables() {
     return tableGuests.some(g => guest.conflictIds.includes(g.id));
   };
 
-  const getTableConflictPairs = (tableGuests: Guest[]): Array<[Guest, Guest]> => {
-    const pairs: Array<[Guest, Guest]> = [];
+  const getTableConflictPairs = (tableGuests: Guest[]): Array<[Guest, Guest, string]> => {
+    const pairs: Array<[Guest, Guest, string]> = [];
     for (let i = 0; i < tableGuests.length; i++) {
       for (let j = i + 1; j < tableGuests.length; j++) {
         const a = tableGuests[i], b = tableGuests[j];
         if ((a.conflictIds || []).includes(b.id) || (b.conflictIds || []).includes(a.id)) {
-          pairs.push([a, b]);
+          const reason = a.conflictReasons?.[b.id] || b.conflictReasons?.[a.id] || '';
+          pairs.push([a, b, reason]);
         }
       }
     }
@@ -150,9 +160,9 @@ export default function Tables() {
     const pregnant = tableGuests.filter(g => g.tags?.includes('pregnant')).length;
     const dietaryList = tableGuests.filter(g => g.dietary).map(g => ({ name: g.name, dietary: g.dietary }));
     const familyCount = tableGuests.filter(g => (g.familyIds || []).length > 0).length;
-    const conflictCount = getTableConflictPairs(tableGuests).length;
+    const conflictPairs = getTableConflictPairs(tableGuests);
 
-    return { elderly, children, disabled, vip, pregnant, dietaryList, familyCount, conflictCount };
+    return { elderly, children, disabled, vip, pregnant, dietaryList, familyCount, conflictCount: conflictPairs.length, conflictPairs };
   };
 
   const handleOpenTable = (t?: Table) => {
@@ -181,6 +191,7 @@ export default function Tables() {
     if (!confirm(`确定删除"${t.tableNo}号桌 ${t.name}"吗？该桌宾客将变为未分配状态。`)) return;
     deleteTable(t.id);
     if (expandedTableId === t.id) setExpandedTableId(null);
+    if (highlightTableId === t.id) setHighlightTableId(null);
   };
 
   const handleDragStart = (e: React.DragEvent, guestId: string) => {
@@ -194,6 +205,13 @@ export default function Tables() {
     setDragOverTableId(null);
     const guestId = draggingGuestId || e.dataTransfer.getData('text/plain');
     if (!guestId) return;
+
+    if (activePlan?.isLocked) {
+      alert('当前方案已锁定，无法修改座位安排');
+      setDraggingGuestId(null);
+      return;
+    }
+
     const guest = guests.find(g => g.id === guestId);
     if (guest && hasTableConflict(tableId, guestId)) {
       if (!confirm(`${guest.name} 与该桌现有宾客存在冲突关系，确定要安排同桌吗？`)) {
@@ -209,11 +227,22 @@ export default function Tables() {
     e.preventDefault();
     const guestId = draggingGuestId || e.dataTransfer.getData('text/plain');
     if (!guestId) return;
+
+    if (activePlan?.isLocked) {
+      alert('当前方案已锁定，无法修改座位安排');
+      setDraggingGuestId(null);
+      return;
+    }
+
     assignGuestToTable(guestId, null);
     setDraggingGuestId(null);
   };
 
   const handleAutoAssign = (clearExisting: boolean) => {
+    if (activePlan?.isLocked) {
+      alert('当前方案已锁定，无法修改座位安排');
+      return;
+    }
     if (tables.length === 0) {
       alert('请先添加桌位');
       return;
@@ -273,8 +302,31 @@ export default function Tables() {
     }
   };
 
+  const handleToggleLock = (planId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const plan = seatingPlans.find(p => p.id === planId);
+    if (!plan) return;
+    if (plan.isLocked) {
+      if (!confirm(`确定解锁方案「${plan.name}」吗？解锁后可以修改座位安排。`)) return;
+      unlockSeatingPlan(planId);
+    } else {
+      if (!confirm(`确定锁定方案「${plan.name}」吗？锁定后无法修改座位安排，防止误操作。`)) return;
+      lockSeatingPlan(planId);
+    }
+  };
+
+  const handleShowTimeline = (plan: SeatingPlan, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setTimelinePlan(plan);
+    setTimelineModalOpen(true);
+  };
+
   const handleOpenEditPlan = (plan: SeatingPlan, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (plan.isLocked) {
+      alert('该方案已锁定，请先解锁再编辑');
+      return;
+    }
     setEditingPlan(plan);
     setPlanName(plan.name);
     setPlanDescription(plan.description);
@@ -288,39 +340,43 @@ export default function Tables() {
     setEditingPlan(null);
   };
 
-  const getPlanDiff = (planId: string) => {
+  const getPlanDiff = (planId: string): PlanDiffEntry[] => {
     const plan = seatingPlans.find(p => p.id === planId);
-    if (!plan) return { changed: [], removed: [], added: [] };
+    if (!plan) return [];
 
     const currentAssignments: Record<string, string | null> = {};
     guests.forEach(g => { currentAssignments[g.id] = g.tableId; });
 
-    const changed: Array<{ name: string; from: string; to: string }> = [];
-    const removed: Array<{ name: string; from: string }> = [];
-    const added: Array<{ name: string; to: string }> = [];
+    const diff: PlanDiffEntry[] = [];
+    const allGuestIds = new Set([...Object.keys(plan.assignments), ...Object.keys(currentAssignments)]);
 
-    Object.entries(plan.assignments).forEach(([gid, tid]) => {
-      const current = currentAssignments[gid];
-      const name = guestNameMap[gid] || '未知宾客';
-      const fromTable = tables.find(t => t.id === tid);
-      const toTable = tables.find(t => t.id === current);
+    allGuestIds.forEach(gid => {
+      const from = plan.assignments[gid] || null;
+      const to = currentAssignments[gid] || null;
 
-      if (current !== tid) {
-        if (current && !tid) {
-          removed.push({ name, from: fromTable ? `${fromTable.tableNo}号桌` : '未知' });
-        } else if (!current && tid) {
-          added.push({ name, to: toTable ? `${toTable.tableNo}号桌` : '未知' });
-        } else if (current && tid) {
-          changed.push({
-            name,
-            from: fromTable ? `${fromTable.tableNo}号桌` : '未知',
-            to: toTable ? `${toTable.tableNo}号桌` : '未知',
-          });
+      if (from !== to) {
+        if (from && to) {
+          diff.push({ type: 'table_change', guestId: gid, fromTableId: from, toTableId: to });
+        } else if (!from && to) {
+          diff.push({ type: 'seat_added', guestId: gid, toTableId: to });
+        } else if (from && !to) {
+          diff.push({ type: 'seat_removed', guestId: gid, fromTableId: from });
         }
       }
     });
 
-    return { changed, removed, added };
+    return diff;
+  };
+
+  const focusTable = (tableId: string | null) => {
+    if (!tableId) return;
+    setExpandedTableId(tableId);
+    setHighlightTableId(tableId);
+    setTimeout(() => setHighlightTableId(null), 3000);
+    const el = document.getElementById(`table-${tableId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   };
 
   const renderGuestMini = (g: Guest, tableGuests?: Guest[]) => {
@@ -331,7 +387,7 @@ export default function Tables() {
     return (
       <div
         key={g.id}
-        draggable
+        draggable={!activePlan?.isLocked}
         onDragStart={e => handleDragStart(e, g.id)}
         onDragEnd={() => setDraggingGuestId(null)}
         className={`group flex items-start gap-2 p-2.5 rounded-xl border cursor-grab active:cursor-grabbing text-sm transition-all ${
@@ -342,9 +398,9 @@ export default function Tables() {
             : hasWithInTable
             ? 'bg-champagne-50 border-champagne-200'
             : 'bg-sand-50 border-sand-100 hover:bg-sand-100'
-        } ${draggingGuestId === g.id ? 'dragging' : ''}`}
+        } ${draggingGuestId === g.id ? 'dragging' : ''} ${activePlan?.isLocked ? '!cursor-not-allowed opacity-90' : ''}`}
       >
-        <GripVertical className="w-4 h-4 text-ink-300 shrink-0 mt-0.5 no-print" />
+        <GripVertical className={`w-4 h-4 shrink-0 mt-0.5 no-print ${activePlan?.isLocked ? 'text-ink-200' : 'text-ink-300'}`} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="font-medium text-ink-800">{g.name}</span>
@@ -389,13 +445,15 @@ export default function Tables() {
             )}
           </div>
         </div>
-        <button
-          onClick={() => assignGuestToTable(g.id, null)}
-          className="hidden group-hover:inline-flex btn-ghost !p-1 no-print shrink-0"
-          title="移出此桌"
-        >
-          <X className="w-3.5 h-3.5 text-ink-500" />
-        </button>
+        {!activePlan?.isLocked && (
+          <button
+            onClick={() => assignGuestToTable(g.id, null)}
+            className="hidden group-hover:inline-flex btn-ghost !p-1 no-print shrink-0"
+            title="移出此桌"
+          >
+            <X className="w-3.5 h-3.5 text-ink-500" />
+          </button>
+        )}
       </div>
     );
   };
@@ -405,7 +463,7 @@ export default function Tables() {
     const tableStats = getTableStats(tableGuests);
 
     return (
-      <div className={`overflow-hidden transition-all ${isExpanded ? 'max-h-[500px]' : 'max-h-0'}`}>
+      <div className={`overflow-hidden transition-all ${isExpanded ? 'max-h-[600px]' : 'max-h-0'}`}>
         <div className="mt-3 pt-3 border-t border-rose-100 space-y-3">
           <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
             {tableStats.elderly > 0 && (
@@ -481,13 +539,21 @@ export default function Tables() {
                 <AlertOctagon className="w-3.5 h-3.5" />
                 ⚠️ 冲突关系（需人工调整）
               </div>
-              <div className="space-y-1">
-                {getTableConflictPairs(tableGuests).map(([a, b], i) => (
-                  <div key={i} className="text-[11px] text-red-600 flex items-center gap-1">
-                    <span className="font-medium">{a.name}</span>
-                    <Link2Off className="w-3 h-3 text-red-400" />
-                    <span className="font-medium">{b.name}</span>
-                    <span className="text-red-400">（冲突）</span>
+              <div className="space-y-1.5">
+                {tableStats.conflictPairs.map(([a, b, reason], i) => (
+                  <div key={i} className="space-y-0.5">
+                    <div className="text-[11px] text-red-600 flex items-center gap-1">
+                      <span className="font-medium">{a.name}</span>
+                      <span className="text-red-400">↔</span>
+                      <span className="font-medium">{b.name}</span>
+                      <span className="text-red-400">（冲突）</span>
+                    </div>
+                    {reason && (
+                      <div className="text-[10px] text-red-400 ml-4 flex items-center gap-0.5">
+                        <MessageCircle className="w-2.5 h-2.5" />
+                        {reason}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -509,7 +575,39 @@ export default function Tables() {
 
   const formatTime = (timestamp: number) => {
     const d = new Date(timestamp);
-    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+  };
+
+  const getTableNo = (tableId: string | null | undefined) => {
+    if (!tableId) return '未安排';
+    const t = tables.find(x => x.id === tableId);
+    return t ? `${t.tableNo}号桌` : '未知桌';
+  };
+
+  const getTimelineActionLabel = (action: string) => {
+    const map: Record<string, string> = {
+      create: '创建方案',
+      update: '更新信息',
+      lock: '锁定方案',
+      unlock: '解锁方案',
+      mark_final: '标记最终版',
+      unmark_final: '取消最终版',
+      seat_change: '座位调整',
+    };
+    return map[action] || action;
+  };
+
+  const getTimelineActionColor = (action: string) => {
+    const map: Record<string, string> = {
+      create: 'bg-mint-100 text-mint-600',
+      update: 'bg-champagne-100 text-champagne-500',
+      lock: 'bg-red-100 text-red-500',
+      unlock: 'bg-sand-200 text-ink-600',
+      mark_final: 'bg-champagne-100 text-champagne-500',
+      unmark_final: 'bg-sand-200 text-ink-600',
+      seat_change: 'bg-rose-100 text-rose-500',
+    };
+    return map[action] || 'bg-sand-100 text-ink-600';
   };
 
   return (
@@ -523,6 +621,7 @@ export default function Tables() {
               <span className="ml-2 text-champagne-500">
                 · 当前方案：<span className="font-medium">{activePlan.name}</span>
                 {activePlan.isFinal && <Star className="w-3.5 h-3.5 inline text-champagne-400 ml-1 fill-champagne-400" />}
+                {activePlan.isLocked && <Lock className="w-3.5 h-3.5 inline text-red-400 ml-1" />}
               </span>
             )}
             {!activePlan && finalPlan && (
@@ -534,6 +633,13 @@ export default function Tables() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2 no-print">
+          <button
+            onClick={() => setShowCheckPanel(!showCheckPanel)}
+            className={`btn-outline flex items-center gap-1.5 ${showCheckPanel ? '!bg-rose-50 !border-rose-200 !text-rose-500' : ''}`}
+          >
+            <Target className="w-4 h-4" />
+            编排检查 {seatingCheckItems.length > 0 && `(${seatingCheckItems.length})`}
+          </button>
           <button
             onClick={() => setShowPlansPanel(!showPlansPanel)}
             className={`btn-outline flex items-center gap-1.5 ${showPlansPanel ? '!bg-champagne-50 !border-champagne-200 !text-champagne-500' : ''}`}
@@ -552,6 +658,7 @@ export default function Tables() {
             onClick={() => handleAutoAssign(false)}
             className="btn-outline flex items-center gap-1.5"
             title="保留已有安排，仅排未分配宾客"
+            disabled={activePlan?.isLocked}
           >
             <Sparkles className="w-4 h-4 text-champagne-400" />
             智能补排
@@ -559,6 +666,7 @@ export default function Tables() {
           <button
             onClick={() => handleAutoAssign(true)}
             className="btn-primary flex items-center gap-1.5"
+            disabled={activePlan?.isLocked}
           >
             <Sparkles className="w-4 h-4" />
             一键初排
@@ -568,6 +676,99 @@ export default function Tables() {
           </button>
         </div>
       </div>
+
+      {activePlan?.isLocked && (
+        <div className="card card-inner bg-red-50/50 border-red-200 flex items-center gap-3 py-3">
+          <Lock className="w-5 h-5 text-red-500 shrink-0" />
+          <div className="flex-1 text-sm text-red-600">
+            当前方案「{activePlan.name}」已锁定，无法修改座位安排。如需修改，请先在方案版本中解锁。
+          </div>
+          <button
+            onClick={() => {
+              if (!confirm('确定解锁当前方案吗？解锁后可以修改座位安排。')) return;
+              unlockSeatingPlan(activePlan.id);
+            }}
+            className="btn-outline !py-1.5 !text-sm"
+          >
+            <Unlock className="w-4 h-4" />解锁
+          </button>
+        </div>
+      )}
+
+      {showCheckPanel && (
+        <div className="card card-inner no-print">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="section-title mb-0 flex items-center gap-2">
+              <Target className="w-5 h-5 text-rose-400" />
+              编排协作检查
+              <span className="text-xs font-normal text-ink-500">
+                集中查看家属拆分、优先同桌未满足、冲突、无座位等问题
+              </span>
+            </h3>
+            <button onClick={() => setShowCheckPanel(false)} className="btn-ghost !p-1.5">
+              <X className="w-4 h-4 text-ink-500" />
+            </button>
+          </div>
+          {seatingCheckItems.length === 0 ? (
+            <div className="text-center py-10">
+              <CheckCircle2 className="w-12 h-12 text-mint-400 mx-auto mb-3" />
+              <p className="text-mint-500 font-medium">🎉 编排检查通过，没有发现问题！</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {seatingCheckItems.map((item, idx) => (
+                <div
+                  key={idx}
+                  className={`flex items-start gap-3 p-3 rounded-xl border ${
+                    item.type === 'conflict' ? 'bg-red-50 border-red-200' :
+                    item.type === 'family_split' ? 'bg-rose-50 border-rose-200' :
+                    item.type === 'with_split' ? 'bg-champagne-50 border-champagne-200' :
+                    'bg-sand-50 border-sand-200'
+                  }`}
+                >
+                  <div className="shrink-0 mt-0.5">
+                    {item.type === 'conflict' && <AlertOctagon className="w-5 h-5 text-red-500" />}
+                    {item.type === 'family_split' && <UsersRound className="w-5 h-5 text-rose-500" />}
+                    {item.type === 'with_split' && <Heart className="w-5 h-5 text-champagne-500" />}
+                    {item.type === 'no_seat' && <MapPin className="w-5 h-5 text-ink-500" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-sm font-medium ${
+                      item.type === 'conflict' ? 'text-red-700' :
+                      item.type === 'family_split' ? 'text-rose-600' :
+                      item.type === 'with_split' ? 'text-champagne-600' :
+                      'text-ink-700'
+                    }`}>
+                      {item.type === 'conflict' && '⚠️ 同桌冲突'}
+                      {item.type === 'family_split' && '👨‍👩‍👧 家属被拆分'}
+                      {item.type === 'with_split' && '🤝 优先同桌未满足'}
+                      {item.type === 'no_seat' && '📍 未安排座位'}
+                    </div>
+                    <div className="text-sm text-ink-600 mt-0.5">{item.message}</div>
+                    {item.tableIds.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {item.tableIds.map(tid => {
+                          const t = tables.find(x => x.id === tid);
+                          return (
+                            <button
+                              key={tid}
+                              onClick={() => focusTable(tid)}
+                              className="chip border !text-[11px] bg-white border-rose-200 text-rose-500 hover:bg-rose-50 flex items-center gap-1"
+                            >
+                              <ZoomIn className="w-3 h-3" />
+                              {t ? `${t.tableNo}号桌 · ${t.name || '未命名'}` : tid}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {showPlansPanel && (
         <div className="card card-inner no-print">
@@ -609,6 +810,10 @@ export default function Tables() {
               {[...seatingPlans].sort((a, b) => b.updatedAt - a.updatedAt).map(plan => {
                 const isActive = plan.id === activePlanId;
                 const diff = comparePlanId && plan.id === comparePlanId ? getPlanDiff(comparePlanId) : null;
+                const tableChanges = diff?.filter(d => d.type === 'table_change') || [];
+                const seatAdded = diff?.filter(d => d.type === 'seat_added') || [];
+                const seatRemoved = diff?.filter(d => d.type === 'seat_removed') || [];
+
                 return (
                   <div
                     key={plan.id}
@@ -626,6 +831,9 @@ export default function Tables() {
                           {plan.isFinal && (
                             <Star className="w-4 h-4 text-champagne-400 fill-champagne-400 shrink-0" />
                           )}
+                          {plan.isLocked && (
+                            <Lock className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                          )}
                           {isActive && (
                             <span className="chip !py-0 !px-1.5 !text-[10px] bg-rose-100 text-rose-500 border border-rose-200">
                               当前
@@ -636,13 +844,31 @@ export default function Tables() {
                           <p className="text-xs text-ink-500 mt-1 line-clamp-2">{plan.description}</p>
                         )}
                       </div>
-                      <div className="flex gap-0.5 shrink-0">
+                      <div className="flex gap-0.5 shrink-0 flex-wrap">
+                        <button
+                          onClick={e => handleShowTimeline(plan, e)}
+                          className="btn-ghost !p-1"
+                          title="查看操作时间线"
+                        >
+                          <History className="w-3.5 h-3.5 text-ink-500" />
+                        </button>
                         <button
                           onClick={e => handleOpenEditPlan(plan, e)}
                           className="btn-ghost !p-1"
                           title="编辑方案信息"
                         >
                           <Edit3 className="w-3.5 h-3.5 text-ink-500" />
+                        </button>
+                        <button
+                          onClick={e => handleToggleLock(plan.id, e)}
+                          className="btn-ghost !p-1"
+                          title={plan.isLocked ? '解锁方案' : '锁定方案'}
+                        >
+                          {plan.isLocked ? (
+                            <Unlock className="w-3.5 h-3.5 text-red-400" />
+                          ) : (
+                            <Lock className="w-3.5 h-3.5 text-ink-500" />
+                          )}
                         </button>
                         <button
                           onClick={e => handleToggleFinal(plan.id, e)}
@@ -673,23 +899,53 @@ export default function Tables() {
                         <Users className="w-3 h-3" />
                         {Object.keys(plan.assignments).length} 人
                       </span>
+                      {(plan.timeline?.length || 0) > 0 && (
+                        <span className="flex items-center gap-0.5">
+                          <History className="w-3 h-3" />
+                          {plan.timeline.length} 条记录
+                        </span>
+                      )}
                     </div>
-                    {diff && (diff.changed.length > 0 || diff.removed.length > 0 || diff.added.length > 0) && (
-                      <div className="mt-2 pt-2 border-t border-rose-100 text-[11px] space-y-1">
-                        <div className="text-ink-500 font-medium">与当前方案对比：</div>
-                        {diff.changed.length > 0 && (
-                          <div className="text-champagne-500">
-                            🔄 {diff.changed.map(d => `${d.name} ${d.from}→${d.to}`).join('、')}
+                    {diff && (tableChanges.length > 0 || seatAdded.length > 0 || seatRemoved.length > 0) && (
+                      <div className="mt-2 pt-2 border-t border-rose-100 text-[11px] space-y-1.5">
+                        <div className="text-ink-500 font-medium flex items-center gap-1">
+                          <Settings className="w-3 h-3" />
+                          与当前方案对比（共{diff.length}处变动）：
+                        </div>
+                        {tableChanges.length > 0 && (
+                          <div className="space-y-0.5">
+                            <div className="text-champagne-500 font-medium">🔄 换桌（{tableChanges.length}人）：</div>
+                            <div className="flex flex-wrap gap-1">
+                              {tableChanges.map((d, i) => (
+                                <span key={i} className="bg-champagne-50 border border-champagne-200 rounded px-1.5 py-0.5">
+                                  {guestNameMap[d.guestId]} {getTableNo(d.fromTableId)}→{getTableNo(d.toTableId)}
+                                </span>
+                              ))}
+                            </div>
                           </div>
                         )}
-                        {diff.added.length > 0 && (
-                          <div className="text-mint-500">
-                            ➕ {diff.added.map(d => `${d.name}→${d.to}`).join('、')}
+                        {seatAdded.length > 0 && (
+                          <div className="space-y-0.5">
+                            <div className="text-mint-500 font-medium">➕ 新安排（{seatAdded.length}人）：</div>
+                            <div className="flex flex-wrap gap-1">
+                              {seatAdded.map((d, i) => (
+                                <span key={i} className="bg-mint-50 border border-mint-200 rounded px-1.5 py-0.5">
+                                  {guestNameMap[d.guestId]}→{getTableNo(d.toTableId)}
+                                </span>
+                              ))}
+                            </div>
                           </div>
                         )}
-                        {diff.removed.length > 0 && (
-                          <div className="text-red-500">
-                            ➖ {diff.removed.map(d => `${d.name} 移出${d.from}`).join('、')}
+                        {seatRemoved.length > 0 && (
+                          <div className="space-y-0.5">
+                            <div className="text-red-500 font-medium">➖ 移出座位（{seatRemoved.length}人）：</div>
+                            <div className="flex flex-wrap gap-1">
+                              {seatRemoved.map((d, i) => (
+                                <span key={i} className="bg-red-50 border border-red-200 rounded px-1.5 py-0.5">
+                                  {guestNameMap[d.guestId]} 从{getTableNo(d.fromTableId)}移出
+                                </span>
+                              ))}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -752,14 +1008,14 @@ export default function Tables() {
                 return (
                   <div
                     key={g.id}
-                    draggable
+                    draggable={!activePlan?.isLocked}
                     onDragStart={e => handleDragStart(e, g.id)}
                     onDragEnd={() => setDraggingGuestId(null)}
                     className={`flex items-start gap-2 p-3 rounded-xl border cursor-grab active:cursor-grabbing transition-all hover:bg-rose-50 ${
                       hasConflict ? 'bg-red-50/60 border-red-200' : 'bg-rose-50/60 border-rose-100'
-                    } ${draggingGuestId === g.id ? 'dragging' : ''}`}
+                    } ${draggingGuestId === g.id ? 'dragging' : ''} ${activePlan?.isLocked ? '!cursor-not-allowed opacity-90' : ''}`}
                   >
-                    <GripVertical className={`w-4 h-4 shrink-0 mt-0.5 no-print ${hasConflict ? 'text-red-300' : 'text-rose-300'}`} />
+                    <GripVertical className={`w-4 h-4 shrink-0 mt-0.5 no-print ${activePlan?.isLocked ? 'text-ink-200' : hasConflict ? 'text-red-300' : 'text-rose-300'}`} />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-medium text-ink-800 text-sm">{g.name}</span>
@@ -797,10 +1053,24 @@ export default function Tables() {
                           </span>
                         )}
                         {hasConflict && (
-                          <span className="text-[11px] text-red-600 bg-red-100/70 border border-red-200 rounded px-1.5 py-0.5 flex items-center gap-0.5 font-medium">
-                            <AlertOctagon className="w-3 h-3" />
-                            冲突: {(g.conflictIds || []).map(id => guestNameMap[id]).filter(Boolean).join('、')}
-                          </span>
+                          <div className="w-full space-y-0.5">
+                            {(g.conflictIds || []).map(cid => {
+                              const reason = g.conflictReasons?.[cid];
+                              return (
+                                <div key={cid} className="flex items-start gap-0.5">
+                                  <span className="text-[11px] text-red-600 bg-red-100/70 border border-red-200 rounded px-1.5 py-0.5 flex items-center gap-0.5 font-medium">
+                                    <AlertOctagon className="w-3 h-3" />
+                                    冲突: {guestNameMap[cid]}
+                                  </span>
+                                  {reason && (
+                                    <span className="text-[10px] text-red-400 mt-0.5">
+                                      <MessageCircle className="w-2.5 h-2.5 inline" /> {reason}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -832,10 +1102,12 @@ export default function Tables() {
                 const isExpanded = expandedTableId === t.id;
                 const tableStats = getTableStats(tableGuests);
                 const hasDetails = tableStats.elderly + tableStats.children + tableStats.disabled + tableStats.vip + tableStats.pregnant + tableStats.dietaryList.length + tableStats.familyCount + tableStats.conflictCount > 0;
+                const isHighlighted = highlightTableId === t.id;
 
                 return (
                   <div
                     key={t.id}
+                    id={`table-${t.id}`}
                     onDragOver={e => { e.preventDefault(); setDragOverTableId(t.id); }}
                     onDragLeave={() => setDragOverTableId(prev => prev === t.id ? null : prev)}
                     onDrop={e => handleDropToTable(e, t.id)}
@@ -845,7 +1117,9 @@ export default function Tables() {
                           ? 'drag-over border-red-400 ring-2 ring-red-200'
                           : 'drag-over'
                         : ''
-                    } ${hasConflict ? 'conflict-pulse border-red-300' : ''}`}
+                    } ${hasConflict ? 'conflict-pulse border-red-300' : ''} ${
+                      isHighlighted ? 'ring-4 ring-rose-400 ring-opacity-75 animate-pulse' : ''
+                    }`}
                   >
                     <div className="relative mb-4">
                       <div
@@ -916,12 +1190,13 @@ export default function Tables() {
                         )}
                       </div>
                       {hasConflict && (
-                        <div className="mt-1 text-[11px] text-red-500 bg-red-50 border border-red-100 rounded-lg px-2 py-1">
-                          {conflictPairs.map(([a, b], i) => (
-                            <span key={i}>
+                        <div className="mt-1 text-[11px] text-red-500 bg-red-50 border border-red-100 rounded-lg px-2 py-1 space-y-0.5">
+                          {conflictPairs.map(([a, b, reason], i) => (
+                            <div key={i}>
                               ⚠️ {a.name} ↔ {b.name} 存在冲突
+                              {reason && <span className="text-red-400 ml-1">（{reason}）</span>}
                               {i < conflictPairs.length - 1 && '；'}
-                            </span>
+                            </div>
                           ))}
                         </div>
                       )}
@@ -932,7 +1207,7 @@ export default function Tables() {
                     <div className="space-y-1.5 max-h-64 overflow-y-auto scrollbar-thin">
                       {tableGuests.length === 0 ? (
                         <div className="text-center text-sm text-ink-500 py-6 border-2 border-dashed border-rose-100 rounded-xl">
-                          拖拽宾客到此桌
+                          将宾客拖拽至此
                         </div>
                       ) : (
                         tableGuests.map(g => renderGuestMini(g, tableGuests))
@@ -949,26 +1224,45 @@ export default function Tables() {
       <Modal
         open={tableModalOpen}
         onClose={() => setTableModalOpen(false)}
-        title={editingTable ? `编辑桌位` : `添加桌位`}
+        title={editingTable ? '编辑桌位' : '添加桌位'}
         size="sm"
       >
         <div className="space-y-4">
-          <div>
-            <label className="label">桌号</label>
-            <input type="number" min="1" className="input" value={tableForm.tableNo} onChange={e => setTableForm({ ...tableForm, tableNo: Number(e.target.value) })} />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">桌号 *</label>
+              <input
+                type="number"
+                className="input"
+                value={tableForm.tableNo}
+                onChange={e => setTableForm(prev => ({ ...prev, tableNo: parseInt(e.target.value) || 0 }))}
+                min={1}
+              />
+            </div>
+            <div>
+              <label className="label">容量 *</label>
+              <input
+                type="number"
+                className="input"
+                value={tableForm.capacity}
+                onChange={e => setTableForm(prev => ({ ...prev, capacity: parseInt(e.target.value) || 0 }))}
+                min={1}
+              />
+            </div>
           </div>
           <div>
-            <label className="label">桌名 / 桌次说明</label>
-            <input className="input" value={tableForm.name} onChange={e => setTableForm({ ...tableForm, name: e.target.value })} placeholder="如：主桌、男方亲戚..." />
-          </div>
-          <div>
-            <label className="label">容纳人数</label>
-            <input type="number" min="1" className="input" value={tableForm.capacity} onChange={e => setTableForm({ ...tableForm, capacity: Number(e.target.value) })} />
+            <label className="label">桌名</label>
+            <input
+              className="input"
+              value={tableForm.name}
+              onChange={e => setTableForm(prev => ({ ...prev, name: e.target.value }))}
+              placeholder="如：主桌、男方亲友..."
+            />
           </div>
         </div>
         <div className="mt-6 flex justify-end gap-2 no-print">
           <button onClick={() => setTableModalOpen(false)} className="btn-outline">取消</button>
-          <button onClick={handleSubmitTable} className="btn-primary">{editingTable ? '保存' : '添加桌位'}</button>
+          <button onClick={handleSubmitTable} className="btn-primary">{editingTable ? '保存' : '添加'}</button>
         </div>
       </Modal>
 
@@ -979,81 +1273,60 @@ export default function Tables() {
         size="lg"
       >
         {autoSummary && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
-            <div className="bg-mint-50 border border-mint-100 rounded-xl p-3 text-center">
+          <div className="mb-4 grid grid-cols-3 gap-3 text-center">
+            <div className="bg-mint-50 border border-mint-100 rounded-xl p-3">
               <div className="text-2xl font-bold text-mint-500">{autoSummary.totalAssigned}</div>
-              <div className="text-xs text-mint-400">已安排</div>
+              <div className="text-xs text-ink-500">成功安排</div>
             </div>
-            <div className="bg-rose-50 border border-rose-100 rounded-xl p-3 text-center">
-              <div className="text-2xl font-bold text-rose-500">{autoSummary.totalUnassigned}</div>
-              <div className="text-xs text-rose-400">未安排</div>
+            <div className="bg-sand-50 border border-sand-100 rounded-xl p-3">
+              <div className="text-2xl font-bold text-ink-700">{autoSummary.familiesKeptTogether + autoSummary.familiesSplit}</div>
+              <div className="text-xs text-ink-500">家属群体</div>
             </div>
-            <div className="bg-champagne-50 border border-champagne-100 rounded-xl p-3 text-center">
-              <div className="text-2xl font-bold text-champagne-500">{autoSummary.conflictsAvoided}</div>
-              <div className="text-xs text-champagne-400">避开冲突</div>
-            </div>
-            <div className="bg-rose-50 border border-rose-100 rounded-xl p-3 text-center">
+            <div className="bg-rose-50 border border-rose-100 rounded-xl p-3">
               <div className="text-2xl font-bold text-rose-500">{autoSummary.familiesKeptTogether}</div>
-              <div className="text-xs text-rose-400">家属团聚</div>
-            </div>
-            <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-center">
-              <div className="text-2xl font-bold text-red-500">{autoSummary.familiesSplit}</div>
-              <div className="text-xs text-red-400">家属拆分</div>
-            </div>
-            <div className="bg-purple-50 border border-purple-100 rounded-xl p-3 text-center">
-              <div className="text-2xl font-bold text-purple-500">{autoSummary.withKeptTogether}</div>
-              <div className="text-xs text-purple-400">优先同桌</div>
+              <div className="text-xs text-ink-500">家属保全</div>
             </div>
           </div>
         )}
-        {autoUnmetNeeds.length > 0 && (
+        {autoWarnings.length > 0 && (
           <div className="mb-4">
-            <h5 className="text-sm font-semibold text-ink-800 mb-2 flex items-center gap-1.5">
-              <Settings className="w-4 h-4 text-rose-400" />
-              未满足需求（需人工微调）
-            </h5>
-            <div className="space-y-2 max-h-[40vh] overflow-y-auto scrollbar-thin">
-              {autoUnmetNeeds.map((need, i) => (
-                <div
-                  key={i}
-                  className={`flex items-start gap-2 p-3 rounded-lg border text-sm ${
-                    need.type === 'no_seat'
-                      ? 'bg-red-50 border-red-100 text-red-700'
-                      : need.type === 'family_split'
-                      ? 'bg-rose-50 border-rose-100 text-rose-600'
-                      : 'bg-champagne-50 border-champagne-100 text-champagne-400'
-                  }`}
-                >
-                  {need.type === 'no_seat' && <X className="w-4 h-4 shrink-0 mt-0.5" />}
-                  {need.type === 'family_split' && <UsersRound className="w-4 h-4 shrink-0 mt-0.5" />}
-                  {need.type === 'with_split' && <Heart className="w-4 h-4 shrink-0 mt-0.5" />}
-                  <span>{need.message}</span>
+            <div className="text-sm font-medium text-champagne-500 mb-2 flex items-center gap-1.5">
+              <AlertTriangle className="w-4 h-4" />
+              温馨提示
+            </div>
+            <div className="space-y-1.5">
+              {autoWarnings.map((w, i) => (
+                <div key={i} className="text-sm text-ink-600 bg-champagne-50 border border-champagne-100 rounded-lg px-3 py-2">
+                  {w}
                 </div>
               ))}
             </div>
           </div>
         )}
-        {autoWarnings.length > 0 && autoUnmetNeeds.length === 0 && (
-          <div className="space-y-2 max-h-[50vh] overflow-y-auto scrollbar-thin">
-            {autoWarnings.map((w, i) => (
-              <div
-                key={i}
-                className={`flex items-start gap-2 p-3 rounded-lg border text-sm ${
-                  w.startsWith('❌')
-                    ? 'bg-red-50 border-red-100 text-red-700'
-                    : 'bg-champagne-50 border-champagne-100 text-champagne-400'
-                }`}
-              >
-                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{w.replace(/^[❌⚠️]\s*/, '')}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        {autoWarnings.length === 0 && autoUnmetNeeds.length === 0 && (
-          <div className="text-center py-8">
-            <CheckCircle2 className="w-12 h-12 text-mint-400 mx-auto mb-3" />
-            <p className="text-mint-500 font-medium">🎉 智能排桌完成，全部宾客已安排妥当！</p>
+        {autoUnmetNeeds.length > 0 && (
+          <div>
+            <div className="text-sm font-medium text-red-500 mb-2 flex items-center gap-1.5">
+              <AlertOctagon className="w-4 h-4" />
+              未满足的偏好（{autoUnmetNeeds.length}项）
+            </div>
+            <div className="space-y-1.5">
+              {autoUnmetNeeds.map((need, i) => (
+                <div key={i} className="text-sm text-ink-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                  {need.type === 'conflict_override' && (
+                    <span className="text-red-600">⚠️ 冲突：{need.guestIds.map(g => guestNameMap[g]).filter(Boolean).join(' ↔ ')} 被安排在同一桌</span>
+                  )}
+                  {need.type === 'with_split' && (
+                    <span className="text-champagne-600">🤝 优先同桌：{need.guestIds.map(g => guestNameMap[g]).filter(Boolean).join(' 和 ')} 希望同桌但未安排在一起</span>
+                  )}
+                  {need.type === 'family_split' && (
+                    <span className="text-rose-600">👨‍👩‍👧 家属拆分：{need.guestIds.map(g => guestNameMap[g]).filter(Boolean).join('、')} 等家人被分开安排</span>
+                  )}
+                  {need.type === 'no_seat' && (
+                    <span className="text-ink-600">📍 未安排座位：{need.guestIds.map(g => guestNameMap[g]).filter(Boolean).join('、')}</span>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
         <div className="mt-6 flex justify-end no-print">
@@ -1125,6 +1398,69 @@ export default function Tables() {
         <div className="mt-6 flex justify-end gap-2 no-print">
           <button onClick={() => setEditPlanModalOpen(false)} className="btn-outline">取消</button>
           <button onClick={handleSaveEditPlan} className="btn-primary">保存</button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={timelineModalOpen}
+        onClose={() => setTimelineModalOpen(false)}
+        title={`操作时间线 - ${timelinePlan?.name || ''}`}
+        size="lg"
+      >
+        {timelinePlan && (
+          <>
+            {timelinePlan.description && (
+              <div className="mb-4 bg-champagne-50 border border-champagne-100 rounded-xl p-3 text-sm text-champagne-600">
+                <div className="font-medium mb-1 flex items-center gap-1">
+                  <FileText className="w-4 h-4" />方案备注
+                </div>
+                {timelinePlan.description}
+              </div>
+            )}
+            {(timelinePlan.timeline?.length || 0) === 0 ? (
+              <div className="text-center py-10 text-sm text-ink-500">
+                暂无操作记录
+              </div>
+            ) : (
+              <div className="relative">
+                <div className="absolute left-3.5 top-2 bottom-2 w-0.5 bg-rose-100" />
+                <div className="space-y-3">
+                  {[...timelinePlan.timeline].reverse().map(entry => (
+                    <div key={entry.id} className="flex items-start gap-3 pl-1">
+                      <div className={`w-7 h-7 shrink-0 rounded-full flex items-center justify-center ${getTimelineActionColor(entry.action)}`}>
+                        {entry.action === 'create' && <Save className="w-3.5 h-3.5" />}
+                        {entry.action === 'update' && <Edit3 className="w-3.5 h-3.5" />}
+                        {entry.action === 'lock' && <Lock className="w-3.5 h-3.5" />}
+                        {entry.action === 'unlock' && <Unlock className="w-3.5 h-3.5" />}
+                        {entry.action === 'mark_final' && <Star className="w-3.5 h-3.5" />}
+                        {entry.action === 'unmark_final' && <StarOff className="w-3.5 h-3.5" />}
+                        {entry.action === 'seat_change' && <Users className="w-3.5 h-3.5" />}
+                      </div>
+                      <div className="flex-1 min-w-0 bg-sand-50 border border-sand-100 rounded-xl p-3">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="chip !py-0 !px-1.5 !text-[10px] border bg-white">
+                            {getTimelineActionLabel(entry.action)}
+                          </span>
+                          <span className="text-xs text-ink-400">{formatTime(entry.timestamp)}</span>
+                        </div>
+                        <div className="text-sm text-ink-700 mt-1">{entry.description}</div>
+                        {(entry.fromTableId || entry.toTableId) && (
+                          <div className="text-xs text-ink-500 mt-1">
+                            {entry.guestId && <span>变动宾客：{guestNameMap[entry.guestId]}</span>}
+                            {entry.fromTableId && <span> · 从 {getTableNo(entry.fromTableId)}</span>}
+                            {entry.toTableId && <span> → {getTableNo(entry.toTableId)}</span>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        <div className="mt-6 flex justify-end no-print">
+          <button onClick={() => setTimelineModalOpen(false)} className="btn-primary">关闭</button>
         </div>
       </Modal>
     </div>
