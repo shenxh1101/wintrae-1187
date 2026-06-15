@@ -28,6 +28,7 @@ export interface PlanTimelineEntry {
   guestId?: string;
   fromTableId?: string | null;
   toTableId?: string | null;
+  operator?: string;
 }
 
 export interface SeatingPlan {
@@ -54,6 +55,8 @@ export interface SeatingCheckItem {
   guestIds: string[];
   tableIds: string[];
   message: string;
+  detail?: string;
+  groupKey?: string;
 }
 
 export interface Table {

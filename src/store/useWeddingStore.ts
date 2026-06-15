@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import type {
   Guest, Table, ScheduleItem, Supplier, Todo, Item, Gift,
   BudgetCategory, BudgetItem, SeatingPlan, PlanTimelineEntry,
-  SeatingCheckItem,
+  SeatingCheckItem, PlanDiffEntry,
 } from '@/types';
 import { generateId } from '@/utils/id';
 import {
@@ -35,7 +35,14 @@ interface WeddingState {
   updateGuest: (id: string, patch: Partial<Guest>) => void;
   updateGuestWithRelations: (id: string, patch: Partial<Guest>) => void;
   deleteGuest: (id: string) => void;
-  assignGuestToTable: (guestId: string, tableId: string | null, reason?: string) => void;
+  assignGuestToTable: (guestId: string, tableId: string | null, reason?: string, operator?: string) => void;
+  batchAssignGuests: (assignments: Array<{ guestId: string; tableId: string | null }>, reason?: string, operator?: string) => void;
+  compareTwoPlans: (planIdA: string, planIdB: string) => {
+    tableChanges: PlanDiffEntry[];
+    seatAdded: PlanDiffEntry[];
+    seatRemoved: PlanDiffEntry[];
+    tableGuestDiffs: Array<{ tableId: string; tableNo: number; diffA: number; diffB: number; change: number }>;
+  };
   syncGuestRelations: (id: string, oldData: Partial<Guest>, newData: Partial<Guest>) => void;
   clearGuestRelationsFor: (targetId: string) => void;
   updateConflictReason: (sourceId: string, targetId: string, reason: string) => void;
@@ -277,64 +284,181 @@ export const useWeddingStore = create<WeddingState>()(
           })
       })),
 
-      assignGuestToTable: (guestId, tableId, reason) => set((s) => {
-        const guest = s.guests.find(g => g.id === guestId);
+      assignGuestToTable: (guestId, tableId, reason, operator) => {
+        const state = get();
+        const guest = state.guests.find(g => g.id === guestId);
         const oldTableId = guest?.tableId || null;
+
+        if (state.activePlanId) {
+          const plan = state.seatingPlans.find(p => p.id === state.activePlanId);
+          if (plan && plan.isLocked) {
+            alert('当前方案已锁定，无法修改座位安排');
+            return;
+          }
+        }
+
+        if (oldTableId === tableId) return;
+
+        set((s) => {
+          const newGuests = s.guests.map((g) => g.id === guestId ? { ...g, tableId } : g);
+          let newPlans = s.seatingPlans;
+
+          if (s.activePlanId) {
+            const planIdx = s.seatingPlans.findIndex(p => p.id === s.activePlanId);
+            if (planIdx >= 0) {
+              const plan = s.seatingPlans[planIdx];
+              const newAssignments = { ...plan.assignments };
+              if (tableId) {
+                newAssignments[guestId] = tableId;
+              } else {
+                delete newAssignments[guestId];
+              }
+
+              const guestName = guest?.name || '某宾客';
+              let desc = '';
+              if (oldTableId && tableId) {
+                const oldT = s.tables.find(t => t.id === oldTableId);
+                const newT = s.tables.find(t => t.id === tableId);
+                desc = `${guestName} 从 ${oldT?.tableNo || '?'}号桌 换到 ${newT?.tableNo || '?'}号桌${reason ? `：${reason}` : ''}`;
+              } else if (!oldTableId && tableId) {
+                const newT = s.tables.find(t => t.id === tableId);
+                desc = `${guestName} 安排到 ${newT?.tableNo || '?'}号桌${reason ? `：${reason}` : ''}`;
+              } else if (oldTableId && !tableId) {
+                const oldT = s.tables.find(t => t.id === oldTableId);
+                desc = `${guestName} 从 ${oldT?.tableNo || '?'}号桌 移除${reason ? `：${reason}` : ''}`;
+              }
+
+              const newEntry: PlanTimelineEntry = {
+                id: generateId(),
+                timestamp: Date.now(),
+                action: 'seat_change',
+                description: desc,
+                guestId,
+                fromTableId: oldTableId,
+                toTableId: tableId,
+                operator,
+              };
+
+              newPlans = s.seatingPlans.map((p, i) => i === planIdx ? {
+                ...p,
+                assignments: newAssignments,
+                timeline: [...(p.timeline || []), newEntry],
+                updatedAt: Date.now(),
+              } : p);
+            }
+          }
+
+          return { guests: newGuests, seatingPlans: newPlans };
+        });
+      },
+
+      batchAssignGuests: (assignments, reason, operator) => {
         const state = get();
 
         if (state.activePlanId) {
           const plan = state.seatingPlans.find(p => p.id === state.activePlanId);
           if (plan && plan.isLocked) {
             alert('当前方案已锁定，无法修改座位安排');
-            return {};
+            return;
           }
         }
 
-        if (state.activePlanId && oldTableId !== tableId) {
-          const guestName = guest?.name || '某宾客';
-          let desc = '';
-          if (oldTableId && tableId) {
-            const oldT = state.tables.find(t => t.id === oldTableId);
-            const newT = state.tables.find(t => t.id === tableId);
-            desc = `${guestName} 从 ${oldT?.tableNo || '?'}号桌 换到 ${newT?.tableNo || '?'}号桌${reason ? `：${reason}` : ''}`;
-          } else if (!oldTableId && tableId) {
-            const newT = state.tables.find(t => t.id === tableId);
-            desc = `${guestName} 安排到 ${newT?.tableNo || '?'}号桌${reason ? `：${reason}` : ''}`;
-          } else if (oldTableId && !tableId) {
-            const oldT = state.tables.find(t => t.id === oldTableId);
-            desc = `${guestName} 从 ${oldT?.tableNo || '?'}号桌 移除${reason ? `：${reason}` : ''}`;
+        const validChanges = assignments.filter(a => {
+          const g = state.guests.find(x => x.id === a.guestId);
+          return g && g.tableId !== a.tableId;
+        });
+        if (validChanges.length === 0) return;
+
+        set((s) => {
+          const guestMap: Record<string, string | null> = {};
+          validChanges.forEach(a => { guestMap[a.guestId] = a.tableId; });
+          const newGuests = s.guests.map(g => guestMap[g.id] !== undefined ? { ...g, tableId: guestMap[g.id] } : g);
+          let newPlans = s.seatingPlans;
+
+          if (s.activePlanId) {
+            const planIdx = s.seatingPlans.findIndex(p => p.id === s.activePlanId);
+            if (planIdx >= 0) {
+              const plan = s.seatingPlans[planIdx];
+              const newAssignments = { ...plan.assignments };
+              validChanges.forEach(a => {
+                if (a.tableId) {
+                  newAssignments[a.guestId] = a.tableId;
+                } else {
+                  delete newAssignments[a.guestId];
+                }
+              });
+
+              const newEntry: PlanTimelineEntry = {
+                id: generateId(),
+                timestamp: Date.now(),
+                action: 'seat_change',
+                description: `批量调整 ${validChanges.length} 位宾客座位${reason ? `：${reason}` : ''}`,
+                operator,
+              };
+
+              newPlans = s.seatingPlans.map((p, i) => i === planIdx ? {
+                ...p,
+                assignments: newAssignments,
+                timeline: [...(p.timeline || []), newEntry],
+                updatedAt: Date.now(),
+              } : p);
+            }
           }
 
-          if (desc) {
-            setTimeout(() => {
-              const st = get();
-              const idx = st.seatingPlans.findIndex(p => p.id === st.activePlanId);
-              if (idx >= 0) {
-                const newEntry: PlanTimelineEntry = {
-                  id: generateId(),
-                  timestamp: Date.now(),
-                  action: 'seat_change',
-                  description: desc,
-                  guestId,
-                  fromTableId: oldTableId,
-                  toTableId: tableId,
-                };
-                set((st2) => ({
-                  seatingPlans: st2.seatingPlans.map((p, i) => i === idx ? {
-                    ...p,
-                    timeline: [...(p.timeline || []), newEntry],
-                    updatedAt: Date.now(),
-                  } : p),
-                }));
-              }
-            }, 0);
-          }
-        }
+          return { guests: newGuests, seatingPlans: newPlans };
+        });
+      },
 
-        return {
-          guests: s.guests.map((g) => g.id === guestId ? { ...g, tableId } : g)
-        };
-      }),
+      compareTwoPlans: (planIdA, planIdB) => {
+        const state = get();
+        const planA = state.seatingPlans.find(p => p.id === planIdA);
+        const planB = state.seatingPlans.find(p => p.id === planIdB);
+        if (!planA || !planB) return { tableChanges: [], seatAdded: [], seatRemoved: [], tableGuestDiffs: [] };
+
+        const tableChanges: PlanDiffEntry[] = [];
+        const seatAdded: PlanDiffEntry[] = [];
+        const seatRemoved: PlanDiffEntry[] = [];
+
+        const allGuestIds = new Set([...Object.keys(planA.assignments), ...Object.keys(planB.assignments)]);
+        allGuestIds.forEach(gid => {
+          const from = planA.assignments[gid] || null;
+          const to = planB.assignments[gid] || null;
+          if (from !== to) {
+            if (from && to) {
+              tableChanges.push({ type: 'table_change', guestId: gid, fromTableId: from, toTableId: to });
+            } else if (!from && to) {
+              seatAdded.push({ type: 'seat_added', guestId: gid, toTableId: to });
+            } else if (from && !to) {
+              seatRemoved.push({ type: 'seat_removed', guestId: gid, fromTableId: from });
+            }
+          }
+        });
+
+        const tableCountA: Record<string, number> = {};
+        const tableCountB: Record<string, number> = {};
+        Object.entries(planA.assignments).forEach(([, tid]) => {
+          tableCountA[tid] = (tableCountA[tid] || 0) + 1;
+        });
+        Object.entries(planB.assignments).forEach(([, tid]) => {
+          tableCountB[tid] = (tableCountB[tid] || 0) + 1;
+        });
+
+        const allTableIds = new Set([...Object.keys(tableCountA), ...Object.keys(tableCountB)]);
+        const tableGuestDiffs = Array.from(allTableIds).map(tid => {
+          const t = state.tables.find(x => x.id === tid);
+          const diffA = tableCountA[tid] || 0;
+          const diffB = tableCountB[tid] || 0;
+          return {
+            tableId: tid,
+            tableNo: t?.tableNo || 0,
+            diffA,
+            diffB,
+            change: diffB - diffA,
+          };
+        }).sort((a, b) => a.tableNo - b.tableNo);
+
+        return { tableChanges, seatAdded, seatRemoved, tableGuestDiffs };
+      },
 
       syncGuestRelations: (id, oldData, newData) => {
         const state = get();
@@ -588,6 +712,7 @@ export const useWeddingStore = create<WeddingState>()(
         const guests = state.guests;
         const checkItems: SeatingCheckItem[] = [];
         const activeGuests = guests.filter(g => g.status !== 'absent');
+        const confirmedGuests = guests.filter(g => g.status === 'confirmed');
 
         const familyGroups = getFamilyGroups(activeGuests);
         familyGroups.forEach(group => {
@@ -603,38 +728,59 @@ export const useWeddingStore = create<WeddingState>()(
           const usedTables = Object.keys(tableMap);
           if (usedTables.length > 1 || usedTables.includes('__unassigned__')) {
             const names = group.map(gid => guests.find(g => g.id === gid)?.name).filter(Boolean).join('、');
+            const details: string[] = [];
+            Object.entries(tableMap).forEach(([tid, gids]) => {
+              const t = state.tables.find(x => x.id === tid);
+              const label = tid === '__unassigned__' ? '未安排' : `${t?.tableNo || '?'}号桌`;
+              const namesInGroup = gids.map(id => guests.find(g => g.id === id)?.name).filter(Boolean).join('、');
+              details.push(`${label}：${namesInGroup}`);
+            });
             checkItems.push({
               type: 'family_split',
               guestIds: group,
               tableIds: usedTables.filter(t => t !== '__unassigned__'),
-              message: `家属群体「${names}」被拆分到了不同桌位或部分未安排`,
+              message: `家属群体（${group.length}人）「${names}」被拆分到 ${usedTables.length} 处`,
+              detail: details.join('；'),
+              groupKey: `family-${group.sort().join(',')}`,
             });
           }
         });
 
+        const withPairs: string[][] = [];
         activeGuests.forEach(g => {
           (g.withIds || []).forEach(wid => {
             const wg = guests.find(x => x.id === wid);
             if (!wg || wg.status === 'absent') return;
             if (g.id >= wid) return;
             if (g.tableId !== wg.tableId) {
-              checkItems.push({
-                type: 'with_split',
-                guestIds: [g.id, wid],
-                tableIds: [g.tableId, wg.tableId].filter(Boolean) as string[],
-                message: `${g.name} 和 ${wg.name} 希望同桌但被分开了`,
-              });
+              withPairs.push([g.id, wid]);
             }
           });
         });
+        withPairs.forEach(pair => {
+          const a = guests.find(g => g.id === pair[0])!;
+          const b = guests.find(g => g.id === pair[1])!;
+          const tables = [a.tableId, b.tableId].filter(Boolean) as string[];
+          const tableLabels = tables.map(tid => {
+            const t = state.tables.find(x => x.id === tid);
+            return `${t?.tableNo || '?'}号桌`;
+          }).join('、');
+          checkItems.push({
+            type: 'with_split',
+            guestIds: pair,
+            tableIds: tables,
+            message: `${a.name} 和 ${b.name} 希望同桌但被分开（${tableLabels || '部分未安排'}）`,
+            groupKey: `with-${pair.sort().join(',')}`,
+          });
+        });
 
-        activeGuests.forEach(g => {
+        confirmedGuests.forEach(g => {
           if (!g.tableId) {
             checkItems.push({
               type: 'no_seat',
               guestIds: [g.id],
               tableIds: [],
-              message: `${g.name} 还未安排座位`,
+              message: `${g.name}（已确认）还未安排座位`,
             });
           }
         });

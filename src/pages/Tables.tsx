@@ -4,6 +4,7 @@ import {
   Sparkles, Crown, Baby, Accessibility, Flower2, Heart, UsersRound, AlertOctagon,
   Save, ChevronDown, ChevronRight, CheckCircle2, Clock, Star, StarOff, FileText,
   MapPin, Settings, Lock, Unlock, History, MessageCircle, Target, ZoomIn,
+  User, GitCompare, BarChart3, ListCollapse, ListTree,
 } from 'lucide-react';
 import { useWeddingStore } from '@/store/useWeddingStore';
 import StatCard from '@/components/StatCard';
@@ -26,10 +27,10 @@ const TagIconMap: Record<GuestTag, any> = {
 export default function Tables() {
   const {
     guests, tables, seatingPlans, activePlanId,
-    addTable, updateTable, deleteTable, assignGuestToTable,
+    addTable, updateTable, deleteTable, assignGuestToTable, batchAssignGuests,
     saveSeatingPlan, loadSeatingPlan, updateSeatingPlan, deleteSeatingPlan,
     setFinalSeatingPlan, unsetFinalSeatingPlan, lockSeatingPlan, unlockSeatingPlan,
-    getSeatingCheck,
+    getSeatingCheck, compareTwoPlans,
   } = useWeddingStore();
 
   const [tableModalOpen, setTableModalOpen] = useState(false);
@@ -56,6 +57,14 @@ export default function Tables() {
   const [timelinePlan, setTimelinePlan] = useState<SeatingPlan | null>(null);
   const [timelineModalOpen, setTimelineModalOpen] = useState(false);
   const [highlightTableId, setHighlightTableId] = useState<string | null>(null);
+  const [operator, setOperator] = useState('我');
+  const [seatReasonModalOpen, setSeatReasonModalOpen] = useState(false);
+  const [pendingSeatChange, setPendingSeatChange] = useState<{ guestId: string; tableId: string | null } | null>(null);
+  const [seatReason, setSeatReason] = useState('');
+  const [comparePlanA, setComparePlanA] = useState<string | null>(null);
+  const [comparePlanB, setComparePlanB] = useState<string | null>(null);
+  const [compareModalOpen, setCompareModalOpen] = useState(false);
+  const [checkCollapsed, setCheckCollapsed] = useState<Record<string, boolean>>({});
 
   const stats = useMemo(() => {
     const totalSeats = tables.reduce((s, t) => s + t.capacity, 0);
@@ -219,7 +228,7 @@ export default function Tables() {
         return;
       }
     }
-    assignGuestToTable(guestId, tableId);
+    assignGuestToTable(guestId, tableId, seatReason || undefined, operator);
     setDraggingGuestId(null);
   };
 
@@ -234,7 +243,7 @@ export default function Tables() {
       return;
     }
 
-    assignGuestToTable(guestId, null);
+    assignGuestToTable(guestId, null, seatReason || undefined, operator);
     setDraggingGuestId(null);
   };
 
@@ -249,9 +258,8 @@ export default function Tables() {
     }
     if (clearExisting && !confirm('确定清空现有编排并重新智能排桌吗？')) return;
     const result = autoAssignTables(guests, tables, { clearExisting });
-    Object.entries(result.assignments).forEach(([guestId, tableId]) => {
-      assignGuestToTable(guestId, tableId);
-    });
+    const assignments = Object.entries(result.assignments).map(([guestId, tableId]) => ({ guestId, tableId }));
+    batchAssignGuests(assignments, clearExisting ? '一键智能初排' : '智能补排未分配宾客', operator);
     setAutoWarnings(result.warnings);
     setAutoUnmetNeeds(result.unmetNeeds);
     setAutoSummary(result.summary);
@@ -447,7 +455,7 @@ export default function Tables() {
         </div>
         {!activePlan?.isLocked && (
           <button
-            onClick={() => assignGuestToTable(g.id, null)}
+            onClick={() => assignGuestToTable(g.id, null, seatReason || undefined, operator)}
             className="hidden group-hover:inline-flex btn-ghost !p-1 no-print shrink-0"
             title="移出此桌"
           >
@@ -462,8 +470,48 @@ export default function Tables() {
     const isExpanded = expandedTableId === table.id;
     const tableStats = getTableStats(tableGuests);
 
+    const splitFamilies = useMemo(() => {
+      const result: Array<{ guest: Guest; familyMember: Guest; otherTable: Table | null }> = [];
+      tableGuests.forEach(g => {
+        (g.familyIds || []).forEach(fid => {
+          const fg = guests.find(x => x.id === fid);
+          if (fg && fg.tableId && fg.tableId !== table.id) {
+            const otherT = tables.find(t => t.id === fg.tableId);
+            if (!result.find(r => r.guest.id === g.id && r.familyMember.id === fid)) {
+              result.push({ guest: g, familyMember: fg, otherTable: otherT || null });
+            }
+          }
+        });
+      });
+      return result;
+    }, [tableGuests, guests, tables, table.id]);
+
+    const splitWiths = useMemo(() => {
+      const result: Array<{ guest: Guest; withGuest: Guest; otherTable: Table | null }> = [];
+      tableGuests.forEach(g => {
+        (g.withIds || []).forEach(wid => {
+          const wg = guests.find(x => x.id === wid);
+          if (wg && wg.tableId && wg.tableId !== table.id) {
+            const otherT = tables.find(t => t.id === wg.tableId);
+            if (!result.find(r => r.guest.id === g.id && r.withGuest.id === wid)) {
+              result.push({ guest: g, withGuest: wg, otherTable: otherT || null });
+            }
+          }
+        });
+      });
+      return result;
+    }, [tableGuests, guests, tables, table.id]);
+
+    const tableTimelineEntries = useMemo(() => {
+      if (!activePlan?.timeline) return [];
+      return activePlan.timeline.filter(e =>
+        e.action === 'seat_change' &&
+        (e.fromTableId === table.id || e.toTableId === table.id)
+      ).slice(-5).reverse();
+    }, [activePlan, table.id]);
+
     return (
-      <div className={`overflow-hidden transition-all ${isExpanded ? 'max-h-[600px]' : 'max-h-0'}`}>
+      <div className={`overflow-hidden transition-all ${isExpanded ? 'max-h-[1000px]' : 'max-h-0'}`}>
         <div className="mt-3 pt-3 border-t border-rose-100 space-y-3">
           <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
             {tableStats.elderly > 0 && (
@@ -518,7 +566,7 @@ export default function Tables() {
             <div className="bg-rose-50/50 border border-rose-100 rounded-lg p-2.5">
               <div className="text-[11px] font-medium text-rose-500 mb-1.5 flex items-center gap-1">
                 <UsersRound className="w-3.5 h-3.5" />
-                家属关系链
+                已满足：同桌家属关系链
               </div>
               <div className="space-y-1">
                 {getTableFamilyPairs(tableGuests).map(([a, b], i) => (
@@ -527,6 +575,62 @@ export default function Tables() {
                     <Heart className="w-3 h-3 text-rose-400" />
                     <span className="font-medium text-rose-500">{b.name}</span>
                     <span className="text-ink-400">（家属）</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {splitFamilies.length > 0 && (
+            <div className="bg-champagne-50/50 border border-champagne-200 rounded-lg p-2.5">
+              <div className="text-[11px] font-medium text-champagne-600 mb-1.5 flex items-center gap-1">
+                <UsersRound className="w-3.5 h-3.5" />
+                ⚠️ 被拆开的家属（{splitFamilies.length}组）
+              </div>
+              <div className="space-y-1">
+                {splitFamilies.map((item, i) => (
+                  <div key={i} className="text-[11px] text-ink-600 flex items-center gap-1 flex-wrap">
+                    <span className="font-medium text-champagne-600">{item.guest.name}</span>
+                    <span className="text-champagne-400">→</span>
+                    <span className="font-medium text-champagne-600">{item.familyMember.name}</span>
+                    {item.otherTable ? (
+                      <button
+                        onClick={() => focusTable(item.otherTable!.id)}
+                        className="text-rose-500 underline decoration-dotted"
+                      >
+                        （在{item.otherTable.tableNo}号桌）
+                      </button>
+                    ) : (
+                      <span className="text-ink-400">（未安排）</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {splitWiths.length > 0 && (
+            <div className="bg-champagne-50/50 border border-champagne-200 rounded-lg p-2.5">
+              <div className="text-[11px] font-medium text-champagne-600 mb-1.5 flex items-center gap-1">
+                <Heart className="w-3.5 h-3.5" />
+                ⚠️ 未满足的优先同桌（{splitWiths.length}组）
+              </div>
+              <div className="space-y-1">
+                {splitWiths.map((item, i) => (
+                  <div key={i} className="text-[11px] text-ink-600 flex items-center gap-1 flex-wrap">
+                    <span className="font-medium text-champagne-600">{item.guest.name}</span>
+                    <span className="text-champagne-400">→</span>
+                    <span className="font-medium text-champagne-600">{item.withGuest.name}</span>
+                    {item.otherTable ? (
+                      <button
+                        onClick={() => focusTable(item.otherTable!.id)}
+                        className="text-rose-500 underline decoration-dotted"
+                      >
+                        （在{item.otherTable.tableNo}号桌）
+                      </button>
+                    ) : (
+                      <span className="text-ink-400">（未安排）</span>
+                    )}
                   </div>
                 ))}
               </div>
@@ -554,6 +658,40 @@ export default function Tables() {
                         {reason}
                       </div>
                     )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tableTimelineEntries.length > 0 && activePlan && (
+            <div className="bg-sand-50/50 border border-sand-200 rounded-lg p-2.5">
+              <div className="text-[11px] font-medium text-ink-600 mb-2 flex items-center justify-between">
+                <span className="flex items-center gap-1">
+                  <History className="w-3.5 h-3.5" />
+                  最近调整（{tableTimelineEntries.length}次）
+                </span>
+                <button
+                  onClick={() => {
+                    setTimelinePlan(activePlan);
+                    setTimelineModalOpen(true);
+                  }}
+                  className="text-rose-500 flex items-center gap-0.5"
+                >
+                  <FileText className="w-3 h-3" />查看完整时间线
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {tableTimelineEntries.map(entry => (
+                  <div key={entry.id} className="text-[11px] text-ink-600 bg-white/60 rounded-lg px-2 py-1.5 flex items-start gap-2">
+                    <Clock className="w-3 h-3 text-ink-400 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-ink-700">{entry.description}</div>
+                      <div className="text-ink-400 text-[10px] mt-0.5">
+                        {formatTime(entry.timestamp)}
+                        {entry.operator && ` · ${entry.operator}`}
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -632,7 +770,27 @@ export default function Tables() {
             )}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2 no-print">
+        <div className="flex flex-wrap items-center gap-2 no-print">
+          <div className="flex items-center gap-1.5 text-xs text-ink-600 bg-sand-50 border border-sand-200 rounded-lg px-2.5 py-1.5">
+            <User className="w-3.5 h-3.5 text-ink-500" />
+            <span>操作人：</span>
+            <input
+              className="!w-20 !py-0.5 !px-1.5 !text-xs bg-white border border-sand-200 rounded"
+              value={operator}
+              onChange={e => setOperator(e.target.value)}
+              placeholder="我"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-ink-600 bg-sand-50 border border-sand-200 rounded-lg px-2.5 py-1.5">
+            <MessageCircle className="w-3.5 h-3.5 text-ink-500" />
+            <span>改座备注：</span>
+            <input
+              className="!w-36 !py-0.5 !px-1.5 !text-xs bg-white border border-sand-200 rounded"
+              value={seatReason}
+              onChange={e => setSeatReason(e.target.value)}
+              placeholder="可选：如调桌方便照顾"
+            />
+          </div>
           <button
             onClick={() => setShowCheckPanel(!showCheckPanel)}
             className={`btn-outline flex items-center gap-1.5 ${showCheckPanel ? '!bg-rose-50 !border-rose-200 !text-rose-500' : ''}`}
@@ -648,11 +806,12 @@ export default function Tables() {
             方案版本 {seatingPlans.length > 0 && `(${seatingPlans.length})`}
           </button>
           <button
-            onClick={handleOpenSavePlan}
-            className="btn-outline flex items-center gap-1.5"
+            onClick={() => setCompareModalOpen(true)}
+            disabled={seatingPlans.length < 2}
+            className="btn-outline flex items-center gap-1.5 disabled:opacity-50"
           >
-            <Save className="w-4 h-4" />
-            保存方案
+            <GitCompare className="w-4 h-4" />
+            方案对比
           </button>
           <button
             onClick={() => handleAutoAssign(false)}
@@ -702,12 +861,34 @@ export default function Tables() {
               <Target className="w-5 h-5 text-rose-400" />
               编排协作检查
               <span className="text-xs font-normal text-ink-500">
-                集中查看家属拆分、优先同桌未满足、冲突、无座位等问题
+                集中查看家属拆分、优先同桌未满足、冲突、无座位等问题（未安排座位仅统计已确认出席）
               </span>
             </h3>
-            <button onClick={() => setShowCheckPanel(false)} className="btn-ghost !p-1.5">
-              <X className="w-4 h-4 text-ink-500" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCheckCollapsed({})}
+                className="btn-ghost !py-1 !px-2 !text-xs flex items-center gap-1"
+                title="全部展开"
+              >
+                <ListTree className="w-3.5 h-3.5" />全部展开
+              </button>
+              <button
+                onClick={() => {
+                  const collapsed: Record<string, boolean> = {};
+                  seatingCheckItems.forEach(item => {
+                    if (item.groupKey) collapsed[item.groupKey] = true;
+                  });
+                  setCheckCollapsed(collapsed);
+                }}
+                className="btn-ghost !py-1 !px-2 !text-xs flex items-center gap-1"
+                title="按组折叠"
+              >
+                <ListCollapse className="w-3.5 h-3.5" />按组折叠
+              </button>
+              <button onClick={() => setShowCheckPanel(false)} className="btn-ghost !p-1.5">
+                <X className="w-4 h-4 text-ink-500" />
+              </button>
+            </div>
           </div>
           {seatingCheckItems.length === 0 ? (
             <div className="text-center py-10">
@@ -716,55 +897,139 @@ export default function Tables() {
             </div>
           ) : (
             <div className="space-y-2">
-              {seatingCheckItems.map((item, idx) => (
-                <div
-                  key={idx}
-                  className={`flex items-start gap-3 p-3 rounded-xl border ${
-                    item.type === 'conflict' ? 'bg-red-50 border-red-200' :
-                    item.type === 'family_split' ? 'bg-rose-50 border-rose-200' :
-                    item.type === 'with_split' ? 'bg-champagne-50 border-champagne-200' :
-                    'bg-sand-50 border-sand-200'
-                  }`}
-                >
-                  <div className="shrink-0 mt-0.5">
-                    {item.type === 'conflict' && <AlertOctagon className="w-5 h-5 text-red-500" />}
-                    {item.type === 'family_split' && <UsersRound className="w-5 h-5 text-rose-500" />}
-                    {item.type === 'with_split' && <Heart className="w-5 h-5 text-champagne-500" />}
-                    {item.type === 'no_seat' && <MapPin className="w-5 h-5 text-ink-500" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className={`text-sm font-medium ${
-                      item.type === 'conflict' ? 'text-red-700' :
-                      item.type === 'family_split' ? 'text-rose-600' :
-                      item.type === 'with_split' ? 'text-champagne-600' :
-                      'text-ink-700'
-                    }`}>
-                      {item.type === 'conflict' && '⚠️ 同桌冲突'}
-                      {item.type === 'family_split' && '👨‍👩‍👧 家属被拆分'}
-                      {item.type === 'with_split' && '🤝 优先同桌未满足'}
-                      {item.type === 'no_seat' && '📍 未安排座位'}
-                    </div>
-                    <div className="text-sm text-ink-600 mt-0.5">{item.message}</div>
-                    {item.tableIds.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {item.tableIds.map(tid => {
-                          const t = tables.find(x => x.id === tid);
-                          return (
-                            <button
-                              key={tid}
-                              onClick={() => focusTable(tid)}
-                              className="chip border !text-[11px] bg-white border-rose-200 text-rose-500 hover:bg-rose-50 flex items-center gap-1"
-                            >
-                              <ZoomIn className="w-3 h-3" />
-                              {t ? `${t.tableNo}号桌 · ${t.name || '未命名'}` : tid}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
+              {(() => {
+                const grouped: Array<{ key: string; label: string; type: string; items: SeatingCheckItem[]; guestIds: string[] }> = [];
+                const seenGroups = new Set<string>();
+                const singletonItems: SeatingCheckItem[] = [];
+
+                seatingCheckItems.forEach(item => {
+                  if (item.groupKey) {
+                    if (!seenGroups.has(item.groupKey)) {
+                      seenGroups.add(item.groupKey);
+                      grouped.push({
+                        key: item.groupKey,
+                        label: item.message,
+                        type: item.type,
+                        items: [item],
+                        guestIds: item.guestIds,
+                      });
+                    } else {
+                      const group = grouped.find(g => g.key === item.groupKey);
+                      if (group) group.items.push(item);
+                    }
+                  } else {
+                    singletonItems.push(item);
+                  }
+                });
+
+                const getColorClasses = (type: string) => {
+                  switch (type) {
+                    case 'conflict': return { bg: 'bg-red-50', border: 'border-red-200', text: 'text-red-700', accent: 'text-red-500' };
+                    case 'family_split': return { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-600', accent: 'text-rose-500' };
+                    case 'with_split': return { bg: 'bg-champagne-50', border: 'border-champagne-200', text: 'text-champagne-600', accent: 'text-champagne-500' };
+                    default: return { bg: 'bg-sand-50', border: 'border-sand-200', text: 'text-ink-700', accent: 'text-ink-500' };
+                  }
+                };
+
+                return (
+                  <>
+                    {grouped.map(group => {
+                      const colors = getColorClasses(group.type);
+                      const collapsed = checkCollapsed[group.key];
+                      return (
+                        <div key={group.key} className={`rounded-xl border ${colors.bg} ${colors.border}`}>
+                          <button
+                            onClick={() => setCheckCollapsed(prev => ({ ...prev, [group.key]: !prev[group.key] }))}
+                            className="w-full flex items-start gap-3 p-3 text-left"
+                          >
+                            <div className="shrink-0 mt-0.5">
+                              {group.type === 'family_split' && <UsersRound className={`w-5 h-5 ${colors.accent}`} />}
+                              {group.type === 'with_split' && <Heart className={`w-5 h-5 ${colors.accent}`} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-sm font-medium ${colors.text}`}>
+                                {group.type === 'family_split' && `👨‍👩‍👧 家属群体（${group.guestIds.length}人）被拆分`}
+                                {group.type === 'with_split' && '🤝 优先同桌未满足'}
+                              </div>
+                              <div className="text-sm text-ink-600 mt-0.5">
+                                {group.items.map(i => i.guestIds.map(gid => guestNameMap[gid]).filter(Boolean).join('、')).slice(0, 50)}
+                              </div>
+                              {group.items[0]?.detail && collapsed && (
+                                <div className="text-xs text-ink-500 mt-1">{group.items[0].detail}</div>
+                              )}
+                            </div>
+                            <ChevronRight className={`w-4 h-4 ${colors.accent} shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+                          </button>
+                          {!collapsed && (
+                            <div className="px-3 pb-3 space-y-1.5 border-t border-rose-100/50 pt-2 mt-1">
+                              {group.items.map((item, idx) => (
+                                <div key={idx} className="bg-white/60 rounded-lg p-2 text-sm">
+                                  <div className="text-ink-600">{item.message}</div>
+                                  {item.tableIds.length > 0 && (
+                                    <div className="flex flex-wrap gap-1 mt-1.5">
+                                      {item.tableIds.map(tid => {
+                                        const t = tables.find(x => x.id === tid);
+                                        return (
+                                          <button
+                                            key={tid}
+                                            onClick={() => focusTable(tid)}
+                                            className="chip border !text-[11px] bg-white border-rose-200 text-rose-500 hover:bg-rose-50 flex items-center gap-1"
+                                          >
+                                            <ZoomIn className="w-3 h-3" />
+                                            {t ? `${t.tableNo}号桌` : tid}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {singletonItems.map((item, idx) => {
+                      const colors = getColorClasses(item.type);
+                      return (
+                        <div
+                          key={`single-${idx}`}
+                          className={`flex items-start gap-3 p-3 rounded-xl border ${colors.bg} ${colors.border}`}
+                        >
+                          <div className="shrink-0 mt-0.5">
+                            {item.type === 'conflict' && <AlertOctagon className={`w-5 h-5 ${colors.accent}`} />}
+                            {item.type === 'no_seat' && <MapPin className={`w-5 h-5 ${colors.accent}`} />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-sm font-medium ${colors.text}`}>
+                              {item.type === 'conflict' && '⚠️ 同桌冲突'}
+                              {item.type === 'no_seat' && '📍 未安排座位（已确认）'}
+                            </div>
+                            <div className="text-sm text-ink-600 mt-0.5">{item.message}</div>
+                            {item.tableIds.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-2">
+                                {item.tableIds.map(tid => {
+                                  const t = tables.find(x => x.id === tid);
+                                  return (
+                                    <button
+                                      key={tid}
+                                      onClick={() => focusTable(tid)}
+                                      className="chip border !text-[11px] bg-white border-rose-200 text-rose-500 hover:bg-rose-50 flex items-center gap-1"
+                                    >
+                                      <ZoomIn className="w-3 h-3" />
+                                      {t ? `${t.tableNo}号桌 · ${t.name || '未命名'}` : tid}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -1442,6 +1707,11 @@ export default function Tables() {
                             {getTimelineActionLabel(entry.action)}
                           </span>
                           <span className="text-xs text-ink-400">{formatTime(entry.timestamp)}</span>
+                          {entry.operator && (
+                            <span className="text-xs text-ink-400 flex items-center gap-0.5">
+                              <User className="w-3 h-3" />{entry.operator}
+                            </span>
+                          )}
                         </div>
                         <div className="text-sm text-ink-700 mt-1">{entry.description}</div>
                         {(entry.fromTableId || entry.toTableId) && (
@@ -1461,6 +1731,210 @@ export default function Tables() {
         )}
         <div className="mt-6 flex justify-end no-print">
           <button onClick={() => setTimelineModalOpen(false)} className="btn-primary">关闭</button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={compareModalOpen}
+        onClose={() => setCompareModalOpen(false)}
+        title="方案对比"
+        size="xl"
+      >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">方案 A</label>
+              <select
+                className="select w-full"
+                value={comparePlanA || ''}
+                onChange={e => setComparePlanA(e.target.value || null)}
+              >
+                <option value="">选择方案</option>
+                {seatingPlans.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}{p.isFinal ? '（最终版）' : ''}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="label">方案 B</label>
+              <select
+                className="select w-full"
+                value={comparePlanB || ''}
+                onChange={e => setComparePlanB(e.target.value || null)}
+              >
+                <option value="">选择方案</option>
+                {seatingPlans.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}{p.isFinal ? '（最终版）' : ''}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {comparePlanA && comparePlanB ? (() => {
+            const diff = compareTwoPlans(comparePlanA, comparePlanB);
+            const planA = seatingPlans.find(p => p.id === comparePlanA);
+            const planB = seatingPlans.find(p => p.id === comparePlanB);
+            const totalChanges = diff.tableChanges.length + diff.seatAdded.length + diff.seatRemoved.length;
+
+            return (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between text-sm bg-sand-50 border border-sand-200 rounded-xl p-3">
+                  <div>
+                    对比 <span className="font-medium text-rose-500">{planA?.name}</span> → <span className="font-medium text-champagne-500">{planB?.name}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs text-ink-500">
+                    <span>共 {totalChanges} 处变动</span>
+                    <span className="flex items-center gap-0.5">
+                      <BarChart3 className="w-3.5 h-3.5" />
+                      {diff.tableGuestDiffs.length} 桌人数变化
+                    </span>
+                  </div>
+                </div>
+
+                {totalChanges === 0 ? (
+                  <div className="text-center py-10">
+                    <CheckCircle2 className="w-12 h-12 text-mint-400 mx-auto mb-3" />
+                    <p className="text-mint-500 font-medium">两套方案完全一致 🎉</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4 max-h-[60vh] overflow-y-auto scrollbar-thin pr-1">
+                    {diff.tableChanges.length > 0 && (
+                      <div className="bg-champagne-50/50 border border-champagne-200 rounded-xl p-3">
+                        <div className="text-sm font-medium text-champagne-600 mb-2 flex items-center gap-1.5">
+                          <GitCompare className="w-4 h-4" />
+                          🔄 换桌（{diff.tableChanges.length} 人）
+                        </div>
+                        <div className="space-y-1.5">
+                          {diff.tableChanges.map((d, i) => (
+                            <div key={i} className="flex items-center gap-2 text-xs bg-white/70 rounded-lg px-2.5 py-1.5">
+                              <span className="font-medium text-ink-700 min-w-[60px]">{guestNameMap[d.guestId]}</span>
+                              <span className="text-ink-400">{getTableNo(d.fromTableId)}</span>
+                              <span className="text-champagne-500">→</span>
+                              <span className="text-ink-400">{getTableNo(d.toTableId)}</span>
+                              {d.toTableId && (
+                                <button
+                                  onClick={() => {
+                                    setCompareModalOpen(false);
+                                    focusTable(d.toTableId!);
+                                  }}
+                                  className="ml-auto chip border !text-[10px] bg-champagne-50 text-champagne-500 border-champagne-200 flex items-center gap-0.5"
+                                >
+                                  <ZoomIn className="w-3 h-3" />查看B方案中位置
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {diff.seatAdded.length > 0 && (
+                      <div className="bg-mint-50/50 border border-mint-200 rounded-xl p-3">
+                        <div className="text-sm font-medium text-mint-600 mb-2 flex items-center gap-1.5">
+                          <Plus className="w-4 h-4" />
+                          ➕ B方案新增座位（{diff.seatAdded.length} 人）
+                        </div>
+                        <div className="space-y-1.5">
+                          {diff.seatAdded.map((d, i) => (
+                            <div key={i} className="flex items-center gap-2 text-xs bg-white/70 rounded-lg px-2.5 py-1.5">
+                              <span className="font-medium text-ink-700 min-w-[60px]">{guestNameMap[d.guestId]}</span>
+                              <span className="text-mint-500">→ {getTableNo(d.toTableId)}</span>
+                              {d.toTableId && (
+                                <button
+                                  onClick={() => {
+                                    setCompareModalOpen(false);
+                                    focusTable(d.toTableId!);
+                                  }}
+                                  className="ml-auto chip border !text-[10px] bg-mint-50 text-mint-500 border-mint-200 flex items-center gap-0.5"
+                                >
+                                  <ZoomIn className="w-3 h-3" />定位
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {diff.seatRemoved.length > 0 && (
+                      <div className="bg-red-50/50 border border-red-200 rounded-xl p-3">
+                        <div className="text-sm font-medium text-red-600 mb-2 flex items-center gap-1.5">
+                          <X className="w-4 h-4" />
+                          ➖ B方案移出座位（{diff.seatRemoved.length} 人）
+                        </div>
+                        <div className="space-y-1.5">
+                          {diff.seatRemoved.map((d, i) => (
+                            <div key={i} className="flex items-center gap-2 text-xs bg-white/70 rounded-lg px-2.5 py-1.5">
+                              <span className="font-medium text-ink-700 min-w-[60px]">{guestNameMap[d.guestId]}</span>
+                              <span className="text-red-400">从 {getTableNo(d.fromTableId)} 移出</span>
+                              {d.fromTableId && (
+                                <button
+                                  onClick={() => {
+                                    loadSeatingPlan(comparePlanA);
+                                    setCompareModalOpen(false);
+                                    setTimeout(() => focusTable(d.fromTableId!), 100);
+                                  }}
+                                  className="ml-auto chip border !text-[10px] bg-red-50 text-red-500 border-red-200 flex items-center gap-0.5"
+                                >
+                                  <ZoomIn className="w-3 h-3" />A方案中位置
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {diff.tableGuestDiffs.some(d => d.change !== 0) && (
+                      <div className="bg-rose-50/50 border border-rose-200 rounded-xl p-3">
+                        <div className="text-sm font-medium text-rose-600 mb-2 flex items-center gap-1.5">
+                          <BarChart3 className="w-4 h-4" />
+                          📊 各桌人数变化
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {diff.tableGuestDiffs.filter(d => d.change !== 0).map(d => (
+                            <button
+                              key={d.tableId}
+                              onClick={() => {
+                                loadSeatingPlan(comparePlanB);
+                                setCompareModalOpen(false);
+                                setTimeout(() => focusTable(d.tableId), 100);
+                              }}
+                              className="flex items-center justify-between gap-2 text-xs bg-white/70 rounded-lg px-2.5 py-1.5 hover:bg-rose-50 transition-colors"
+                            >
+                              <span className="font-medium text-ink-700">{d.tableNo}号桌</span>
+                              <span className={`flex items-center gap-0.5 ${d.change > 0 ? 'text-mint-500' : 'text-red-500'}`}>
+                                {d.diffA} → {d.diffB}
+                                ({d.change > 0 ? '+' : ''}{d.change})
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })() : (
+            <div className="text-center py-10 text-sm text-ink-500">
+              请选择两套方案进行对比
+            </div>
+          )}
+        </div>
+        <div className="mt-6 flex justify-end gap-2 no-print">
+          <button onClick={() => setCompareModalOpen(false)} className="btn-outline">关闭</button>
+          {comparePlanA && comparePlanB && (
+            <button
+              onClick={() => {
+                loadSeatingPlan(comparePlanB);
+                setCompareModalOpen(false);
+              }}
+              className="btn-primary"
+            >
+              加载 B 方案
+            </button>
+          )}
         </div>
       </Modal>
     </div>
