@@ -72,6 +72,22 @@ export interface Item {
 
 export type GiftMethod = 'cash' | 'transfer' | 'gift';
 
+export interface SeatingPlan {
+  id: string;
+  name: string;
+  description: string;
+  isFinal: boolean;
+  assignments: Record<string, string>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GuestRelation {
+  type: 'family' | 'with' | 'conflict';
+  sourceId: string;
+  targetId: string;
+}
+
 export interface Gift {
   id: string;
   guestName: string;

@@ -3,6 +3,7 @@ import {
   Users, UserPlus, UserCheck, Clock, UserX, Search,
   Edit3, Trash2, ChevronDown, ChevronUp, Filter, AlertOctagon,
   AlertTriangle, Heart, UsersRound, Baby, Accessibility, Crown, Flower2, X, Plus as PlusIcon,
+  MapPin, Link2Off, Link2,
 } from 'lucide-react';
 import { useWeddingStore } from '@/store/useWeddingStore';
 import StatCard from '@/components/StatCard';
@@ -46,7 +47,7 @@ const groupColorMap: Record<GuestGroup, string> = {
 
 export default function Guests() {
   const {
-    guests, tables, addGuest, updateGuest, deleteGuest,
+    guests, tables, addGuestWithRelations, updateGuestWithRelations, deleteGuest,
   } = useWeddingStore();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Guest | null>(null);
@@ -68,7 +69,8 @@ export default function Guests() {
     const pending = guests.filter(g => g.status === 'pending' || g.status === 'inviting').reduce((s, g) => s + (g.headcount || 1), 0);
     const absent = guests.filter(g => g.status === 'absent').length;
     const withRelations = guests.filter(g => (g.conflictIds?.length || 0) + (g.withIds?.length || 0) + (g.familyIds?.length || 0) > 0).length;
-    return { total, confirmed, pending, absent, withRelations };
+    const withTable = guests.filter(g => g.tableId).length;
+    return { total, confirmed, pending, absent, withRelations, withTable };
   }, [guests]);
 
   const filtered = useMemo(() => {
@@ -111,29 +113,23 @@ export default function Guests() {
 
   const handleSubmit = () => {
     if (!form.name.trim()) return alert('请填写姓名');
+
+    const relationConflicts = form.familyIds?.some(fid => form.conflictIds?.includes(fid)) ||
+      form.withIds?.some(wid => form.conflictIds?.includes(wid));
+    if (relationConflicts) {
+      if (!confirm('检测到关系冲突：同一位宾客同时被标记为家属和冲突。确定继续保存吗？')) return;
+    }
+
+    const familyWithOverlap = form.familyIds?.some(fid => form.withIds?.includes(fid));
+    const cleanForm = familyWithOverlap ? {
+      ...form,
+      withIds: form.withIds?.filter(wid => !form.familyIds?.includes(wid)) || [],
+    } : form;
+
     if (editing) {
-      const allRelations = [...(form.conflictIds || []), ...(form.withIds || []), ...(form.familyIds || [])];
-      updateGuest(editing.id, form);
-      guests.forEach(other => {
-        if (!allRelations.includes(other.id)) return;
-        const patch: Partial<Guest> = {};
-        let changed = false;
-        if (form.conflictIds?.includes(other.id) && !(other.conflictIds || []).includes(editing.id)) {
-          patch.conflictIds = [...(other.conflictIds || []), editing.id];
-          changed = true;
-        }
-        if (form.withIds?.includes(other.id) && !(other.withIds || []).includes(editing.id)) {
-          patch.withIds = [...(other.withIds || []), editing.id];
-          changed = true;
-        }
-        if (form.familyIds?.includes(other.id) && !(other.familyIds || []).includes(editing.id)) {
-          patch.familyIds = [...(other.familyIds || []), editing.id];
-          changed = true;
-        }
-        if (changed) updateGuest(other.id, patch);
-      });
+      updateGuestWithRelations(editing.id, cleanForm);
     } else {
-      addGuest(form);
+      addGuestWithRelations(cleanForm);
     }
     setModalOpen(false);
   };
@@ -141,21 +137,41 @@ export default function Guests() {
   const handleDelete = (id: string, name: string) => {
     if (!confirm(`确定删除宾客"${name}"吗？`)) return;
     deleteGuest(id);
-    guests.forEach(g => {
-      const patch: Partial<Guest> = {};
-      if (g.conflictIds?.includes(id)) patch.conflictIds = g.conflictIds.filter(x => x !== id);
-      if (g.withIds?.includes(id)) patch.withIds = g.withIds.filter(x => x !== id);
-      if (g.familyIds?.includes(id)) patch.familyIds = g.familyIds.filter(x => x !== id);
-      if (patch.conflictIds || patch.withIds || patch.familyIds) updateGuest(g.id, patch);
-    });
   };
 
   const toggleId = (field: 'conflictIds' | 'withIds' | 'familyIds', id: string) => {
     const arr = form[field] || [];
-    setForm({
-      ...form,
-      [field]: arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id],
-    });
+    let newArr = arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id];
+
+    if (field === 'familyIds' && newArr.includes(id)) {
+      newArr = [...new Set([...newArr, ...(form.familyIds || [])])];
+    }
+    if (field === 'familyIds') {
+      const otherFields = ['withIds', 'conflictIds'] as const;
+      otherFields.forEach(of => {
+        const otherArr = form[of] || [];
+        if (otherArr.includes(id)) {
+          setForm(prev => ({
+            ...prev,
+            [of]: otherArr.filter(x => x !== id),
+          }));
+        }
+      });
+    }
+    if (field === 'conflictIds') {
+      const otherFields = ['withIds', 'familyIds'] as const;
+      otherFields.forEach(of => {
+        const otherArr = form[of] || [];
+        if (otherArr.includes(id)) {
+          setForm(prev => ({
+            ...prev,
+            [of]: otherArr.filter(x => x !== id),
+          }));
+        }
+      });
+    }
+
+    setForm({ ...form, [field]: newArr });
   };
 
   const toggleTag = (tag: GuestTag) => {
@@ -167,15 +183,19 @@ export default function Guests() {
   };
 
   const handleExportCSV = () => {
-    const header = ['姓名', '电话', '分组', '状态', '人数', '忌口', '特殊需求', '坐席偏好', '标签', '冲突对象', '尽量同桌', '家属'];
-    const rows = guests.map(g => [
-      g.name, g.phone, GUEST_GROUP_LABELS[g.group], GUEST_STATUS_LABELS[g.status],
-      g.headcount, g.dietary, g.specialNeeds, g.seatPreference,
-      (g.tags || []).map(t => GUEST_TAG_LABELS[t]).join('/'),
-      (g.conflictIds || []).map(id => guestNameMap[id]).join('、'),
-      (g.withIds || []).map(id => guestNameMap[id]).join('、'),
-      (g.familyIds || []).map(id => guestNameMap[id]).join('、'),
-    ]);
+    const header = ['姓名', '电话', '分组', '状态', '人数', '忌口', '特殊需求', '坐席偏好', '标签', '冲突对象', '尽量同桌', '家属', '桌位'];
+    const rows = guests.map(g => {
+      const table = tables.find(t => t.id === g.tableId);
+      return [
+        g.name, g.phone, GUEST_GROUP_LABELS[g.group], GUEST_STATUS_LABELS[g.status],
+        g.headcount, g.dietary, g.specialNeeds, g.seatPreference,
+        (g.tags || []).map(t => GUEST_TAG_LABELS[t]).join('/'),
+        (g.conflictIds || []).map(id => guestNameMap[id]).join('、'),
+        (g.withIds || []).map(id => guestNameMap[id]).join('、'),
+        (g.familyIds || []).map(id => guestNameMap[id]).join('、'),
+        table ? `${table.tableNo}号桌 ${table.name}` : '',
+      ];
+    });
     const csv = [header, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
     downloadCSV('宾客清单.csv', csv);
   };
@@ -230,11 +250,14 @@ export default function Guests() {
           ) : (
             others.map(other => {
               const active = selected.includes(other.id);
+              const conflictInOther = field !== 'conflictIds' && (form.conflictIds || []).includes(other.id);
+              const familyInOther = field !== 'familyIds' && (form.familyIds || []).includes(other.id);
               return (
                 <button
                   key={other.id}
                   type="button"
                   onClick={() => toggleId(field, other.id)}
+                  disabled={conflictInOther || familyInOther}
                   className={`chip border transition-all ${
                     active
                       ? field === 'conflictIds'
@@ -242,12 +265,16 @@ export default function Guests() {
                         : field === 'familyIds'
                         ? 'bg-rose-50 text-rose-500 border-rose-200'
                         : 'bg-champagne-50 text-champagne-400 border-champagne-200'
+                      : (conflictInOther || familyInOther)
+                      ? 'bg-sand-100 text-ink-300 border-sand-100 cursor-not-allowed opacity-60'
                       : 'bg-white text-ink-600 border-sand-200 hover:border-rose-200'
                   }`}
                 >
                   {active && <CheckMark />}
                   {other.name}
                   <span className="text-ink-400 text-[10px] ml-0.5">{GUEST_GROUP_LABELS[other.group]}</span>
+                  {conflictInOther && <span className="text-[10px] ml-1 text-red-400">（已冲突）</span>}
+                  {familyInOther && <span className="text-[10px] ml-1 text-rose-400">（已家属）</span>}
                 </button>
               );
             })
@@ -263,12 +290,81 @@ export default function Guests() {
     </svg>
   );
 
+  const renderRelationsSummary = () => {
+    if (!editing) return null;
+    const assignedTable = tables.find(t => t.id === editing.tableId);
+    const familyNames = (editing.familyIds || []).map(id => guestNameMap[id]).filter(Boolean);
+    const withNames = (editing.withIds || []).map(id => guestNameMap[id]).filter(Boolean);
+    const conflictNames = (editing.conflictIds || []).map(id => guestNameMap[id]).filter(Boolean);
+
+    return (
+      <div className="sm:col-span-2 bg-gradient-to-br from-rose-50 to-champagne-50 rounded-xl p-4 border border-rose-100">
+        <h5 className="text-sm font-semibold text-ink-800 mb-3 flex items-center gap-1.5">
+          <Link2 className="w-4 h-4 text-rose-400" />
+          关系与位置总览
+        </h5>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+          <div className="flex items-start gap-2">
+            <MapPin className="w-4 h-4 text-champagne-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="text-ink-500">当前桌位：</span>
+              {assignedTable ? (
+                <span className="font-medium text-ink-800">{assignedTable.tableNo}号桌 · {assignedTable.name || '未命名'}</span>
+              ) : (
+                <span className="text-ink-400">未分配</span>
+              )}
+            </div>
+          </div>
+          {familyNames.length > 0 && (
+            <div className="flex items-start gap-2">
+              <UsersRound className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="text-ink-500">家属（{familyNames.length}人）：</span>
+                <span className="text-rose-500 font-medium">{familyNames.join('、')}</span>
+              </div>
+            </div>
+          )}
+          {withNames.length > 0 && (
+            <div className="flex items-start gap-2">
+              <Heart className="w-4 h-4 text-champagne-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="text-ink-500">优先同桌（{withNames.length}人）：</span>
+                <span className="text-champagne-400 font-medium">{withNames.join('、')}</span>
+              </div>
+            </div>
+          )}
+          {conflictNames.length > 0 && (
+            <div className="flex items-start gap-2 sm:col-span-2">
+              <Link2Off className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <div>
+                <span className="text-ink-500">冲突对象（{conflictNames.length}人）：</span>
+                <span className="text-red-500 font-medium">{conflictNames.join('、')}</span>
+                {conflictNames.map(name => (
+                  <span key={name} className="block text-[11px] text-red-400 mt-0.5">
+                    → 与 {name} 不适合同桌，请在桌位编排时注意
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {familyNames.length === 0 && withNames.length === 0 && conflictNames.length === 0 && (
+            <div className="sm:col-span-2 text-ink-400 text-sm">
+              暂无关系记录，可在下方添加与其他宾客的关系
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
           <h1 className="page-title">宾客清单</h1>
-          <p className="text-sm text-ink-500">共 {guests.length} 位宾客 · {stats.withRelations} 位已标记关系/特殊需求</p>
+          <p className="text-sm text-ink-500">
+            共 {guests.length} 位宾客 · {stats.withTable} 位已分配桌位 · {stats.withRelations} 位已标记关系/特殊需求
+          </p>
         </div>
         <div className="flex gap-2 no-print">
           <button onClick={handleExportCSV} className="btn-outline">
@@ -357,6 +453,11 @@ export default function Guests() {
                       <span className="text-xs text-ink-500">
                         {(g.headcount || 1)} 人{g.phone && ` · ${g.phone}`}
                       </span>
+                      {assignedTable && (
+                        <span className="text-xs text-champagne-400 bg-champagne-50 border border-champagne-100 rounded-full px-2 py-0.5">
+                          📍 {assignedTable.tableNo}号桌
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-0.5 shrink-0 no-print">
@@ -426,6 +527,7 @@ export default function Guests() {
         size="xl"
       >
         <div className="space-y-4">
+          {editing && renderRelationsSummary()}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="label">姓名 *</label>
